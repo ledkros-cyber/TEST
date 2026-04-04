@@ -1,7 +1,6 @@
 """Video tab — video assembly and rendering."""
 import os
-from datetime import datetime
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox,
@@ -9,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config_manager import load_config
-from app.processing.video_processor import VideoConfig, process_video
+from app.processing.video_processor import VideoConfig, process_video, get_gpu_info
 from app.ui.widgets import WorkerThread, SectionHeader, StatusBar
 from app import database
 
@@ -23,6 +22,8 @@ class VideoTab(QWidget):
         self._script_data: dict = {}
         self._worker = None
         self._build_ui()
+        # detect GPU after UI is shown
+        QTimer.singleShot(500, self._detect_gpu)
 
     def set_audio_path(self, path: str):
         self._audio_path = path
@@ -80,6 +81,14 @@ class VideoTab(QWidget):
         settings_group = QGroupBox("Настройки рендера")
         sg_layout = QVBoxLayout(settings_group)
 
+        # GPU status banner
+        self._gpu_label = QLabel("Определяем GPU...")
+        self._gpu_label.setStyleSheet(
+            "background:#1e1f35; border:1px solid #3a3b55; border-radius:4px; "
+            "padding:4px 10px; color:#9090aa; font-size:12px;"
+        )
+        sg_layout.addWidget(self._gpu_label)
+
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Качество:"))
         self.quality_combo = QComboBox()
@@ -103,6 +112,18 @@ class VideoTab(QWidget):
         self.gpu_check = QCheckBox("Использовать")
         self.gpu_check.setChecked(cfg.get("use_gpu", True))
         row1.addWidget(self.gpu_check)
+
+        row1.addSpacing(20)
+        row1.addWidget(QLabel("Потоков нарезки:"))
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 8)
+        self.workers_spin.setValue(3)
+        self.workers_spin.setToolTip(
+            "Сколько клипов нарезать параллельно.\n"
+            "Для Legion RTX рекомендуется 3."
+        )
+        self.workers_spin.setFixedWidth(55)
+        row1.addWidget(self.workers_spin)
         row1.addStretch()
         sg_layout.addLayout(row1)
 
@@ -211,6 +232,30 @@ class VideoTab(QWidget):
         outer.addLayout(bottom)
 
     # ------------------------------------------------------------------
+    def _detect_gpu(self):
+        """Run GPU detection in background and update the banner."""
+        def _probe():
+            return get_gpu_info()
+
+        worker = WorkerThread(_probe)
+        worker.finished.connect(self._on_gpu_info)
+        worker.start()
+        self._gpu_worker = worker  # keep ref
+
+    def _on_gpu_info(self, info: str):
+        if "NVENC" in info:
+            self._gpu_label.setText(f"⚡ GPU: {info}")
+            self._gpu_label.setStyleSheet(
+                "background:#0d2b0d; border:1px solid #4caf81; border-radius:4px; "
+                "padding:4px 10px; color:#4caf81; font-size:12px; font-weight:bold;"
+            )
+        else:
+            self._gpu_label.setText(f"⚠ GPU: {info}")
+            self._gpu_label.setStyleSheet(
+                "background:#2b1a0d; border:1px solid #f0a030; border-radius:4px; "
+                "padding:4px 10px; color:#f0a030; font-size:12px;"
+            )
+
     def _browse_folder(self, field: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку", field.text())
         if folder:
@@ -264,6 +309,7 @@ class VideoTab(QWidget):
             extra_seconds=self.extra_spin.value(),
             script=self._script_data.get("script", ""),
             use_gpu=self.gpu_check.isChecked(),
+            parallel_workers=self.workers_spin.value(),
             progress_callback=self._on_progress,
         )
 
