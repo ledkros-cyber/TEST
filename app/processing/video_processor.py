@@ -11,6 +11,24 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 
+def _find_bin(name: str) -> str:
+    """
+    Look for ffmpeg/ffprobe in this order:
+    1. <project_root>/bin/  (bundled copy)
+    2. System PATH
+    """
+    # project root is two levels up from this file
+    root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    local = os.path.join(root, "bin", name + ".exe")
+    if os.path.isfile(local):
+        return local
+    return name   # fall back to PATH
+
+
+FFMPEG = _find_bin("ffmpeg")
+FFPROBE = _find_bin("ffprobe")
+
+
 @dataclass
 class VideoConfig:
     source_folder: str
@@ -53,7 +71,7 @@ def _run(cmd: list[str], desc: str = "") -> str:
 def get_audio_duration(path: str) -> float:
     """Return duration of an audio/video file in seconds."""
     out = _run([
-        "ffprobe", "-v", "error",
+        FFPROBE, "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         path,
@@ -71,7 +89,7 @@ def get_video_files(folder: str) -> list[str]:
 
 def _get_video_duration(path: str) -> float:
     out = _run([
-        "ffprobe", "-v", "error",
+        FFPROBE, "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         path,
@@ -81,7 +99,7 @@ def _get_video_duration(path: str) -> float:
 
 def _cut_clip(input_path: str, start: float, duration: float, output_path: str):
     _run([
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-ss", str(start),
         "-i", input_path,
         "-t", str(duration),
@@ -102,7 +120,7 @@ def _build_concat_list(clip_paths: list[str], list_path: str):
 
 def _concat_clips(list_path: str, output_path: str):
     _run([
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", list_path,
@@ -156,7 +174,7 @@ def _scale_and_filter(
     )
 
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-i", input_path,
         "-i", audio_path,
         "-filter_complex", filter_complex,
