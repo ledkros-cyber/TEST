@@ -7,25 +7,49 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
-SCRIPT_SYSTEM = """Ты профессиональный сценарист YouTube-видео.
-Ты создаёшь уникальные, захватывающие сценарии на основе анализа конкурентов.
-Твои тексты:
-- Полностью уникальны и не копируют источники
-- Оптимизированы под алгоритмы YouTube (SEO)
-- Написаны живым разговорным языком
-- Удерживают внимание зрителя с первой секунды
-- Структурированы: крючок → основная часть → призыв к действию
+# Supported languages for script generation
+LANGUAGES = {
+    "English":    "English",
+    "Spanish":    "Spanish (Español)",
+    "French":     "French (Français)",
+    "German":     "German (Deutsch)",
+    "Italian":    "Italian (Italiano)",
+    "Portuguese": "Portuguese (Português)",
+    "Russian":    "Russian (Русский)",
+    "Japanese":   "Japanese (日本語)",
+    "Korean":     "Korean (한국어)",
+    "Chinese":    "Chinese Mandarin (中文)",
+    "Arabic":     "Arabic (العربية)",
+    "Hindi":      "Hindi (हिन्दी)",
+    "Turkish":    "Turkish (Türkçe)",
+    "Polish":     "Polish (Polski)",
+    "Dutch":      "Dutch (Nederlands)",
+    "Ukrainian":  "Ukrainian (Українська)",
+}
+
+SCRIPT_SYSTEM = """You are a professional YouTube video scriptwriter specializing in fitness and health content.
+You create unique, engaging scripts that:
+- Are completely original and do not copy source material
+- Are optimized for YouTube algorithms (SEO)
+- Use a conversational, engaging style
+- Hook the viewer within the first 15 seconds
+- Are structured: hook → main content → call-to-action
+- Discuss the GENERAL benefits and science of exercise — never reference a specific exercise by name
+- Can be used over any type of workout video footage
+- Generate excitement and motivation in the viewer
 """
+
 
 def generate_script(
     api_key: str,
     source_videos: list[dict],
     master_prompt: str = "",
-    target_words: int = 800,
-    language: str = "ru",
+    target_chars: int = 8000,
+    language: str = "English",
 ) -> dict:
     """
-    Generate a script based on analysed source videos.
+    Generate a script about exercise benefits.
+    source_videos is optional — used for SEO context only.
     Returns dict with: script, title, description, tags, thumbnail_prompts
     """
     if not ANTHROPIC_AVAILABLE:
@@ -33,65 +57,65 @@ def generate_script(
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    sources_text = ""
-    for i, v in enumerate(source_videos, 1):
-        sources_text += f"\n--- Источник {i} ---\n"
-        sources_text += f"Заголовок: {v.get('title', '')}\n"
-        sources_text += f"Описание: {v.get('description', '')[:1000]}\n"
-        if v.get("tags"):
-            sources_text += f"Теги: {', '.join(v['tags'][:20])}\n"
-        if v.get("transcript"):
-            sources_text += f"Субтитры (фрагмент): {v['transcript'][:2000]}\n"
+    # Build SEO context from source videos (optional)
+    seo_context = ""
+    if source_videos:
+        seo_context = "\nSEO CONTEXT FROM TOP YOUTUBE VIDEOS ON THIS TOPIC:\n"
+        for i, v in enumerate(source_videos[:5], 1):
+            seo_context += f"\n--- Source {i} ---\n"
+            seo_context += f"Title: {v.get('title', '')}\n"
+            if v.get("tags"):
+                seo_context += f"Tags: {', '.join(str(t) for t in v['tags'][:15])}\n"
+            if v.get("description"):
+                seo_context += f"Description excerpt: {v.get('description', '')[:400]}\n"
 
+    # Build user prompt
+    lang_display = language
     user_prompt = f"""
 {master_prompt}
 
-ИСТОЧНИКИ ДЛЯ АНАЛИЗА:
-{sources_text}
+TASK:
+Write a YouTube video script in {lang_display}.
 
-ЗАДАНИЕ:
-1. Напиши уникальный сценарий для YouTube-видео на РУССКОМ языке.
-   - Примерная длина: {target_words} слов (±10%)
-   - НЕ копируй источники — создай оригинальный контент на основе тематики
-   - Начни с сильного крючка (hook) первые 15 секунд
-   - В конце — призыв подписаться и включить уведомления
+STRICT RULES:
+1. Write ENTIRELY in {lang_display} — every word, including the title, description, tags
+2. Target length: approximately {target_chars} characters (±10%)
+3. DO NOT mention any specific exercise by name (e.g., squats, push-ups, lunges, etc.)
+4. Write about the GENERAL benefits, science, and motivation behind exercise/working out
+5. The script must work over any workout video footage — keep it universal
+6. Strong hook in the first 15 seconds
+7. End with a call to subscribe and enable notifications
+8. Use an energetic, motivating tone
 
-2. Придумай SEO-оптимизированный заголовок (до 70 символов)
+{seo_context}
 
-3. Напиши описание для видео (150-300 слов), включи ключевые слова
+OUTPUT FORMAT (use these exact delimiters):
 
-4. Предложи 15-20 тегов через запятую
+===SCRIPT===
+[The full video script — approximately {target_chars} characters]
 
-5. Предложи 3 разных промта для генерации превью (thumbnail) — на английском языке,
-   каждый с другим визуальным стилем (реалистичный, минималистичный, яркий/кричащий)
+===TITLE===
+[SEO-optimized YouTube title, max 70 characters, in {lang_display}]
 
-Ответ дай СТРОГО в формате:
+===DESCRIPTION===
+[YouTube description, 150-300 words, keyword-rich, in {lang_display}]
 
-===СЦЕНАРИЙ===
-[текст сценария]
+===TAGS===
+[15-20 comma-separated tags in {lang_display}]
 
-===ЗАГОЛОВОК===
-[заголовок]
+===PROMPT1===
+[Thumbnail image prompt — photorealistic style, English only]
 
-===ОПИСАНИЕ===
-[описание]
+===PROMPT2===
+[Thumbnail image prompt — minimalist/clean style, English only]
 
-===ТЕГИ===
-[теги через запятую]
-
-===ПРОМТ 1===
-[промт для превью 1]
-
-===ПРОМТ 2===
-[промт для превью 2]
-
-===ПРОМТ 3===
-[промт для превью 3]
+===PROMPT3===
+[Thumbnail image prompt — bold/eye-catching style, English only]
 """
 
     message = client.messages.create(
         model="claude-opus-4-6",
-        max_tokens=4096,
+        max_tokens=8192,
         system=SCRIPT_SYSTEM,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -109,24 +133,28 @@ def _parse_response(raw: str) -> dict:
     }
 
     def extract(tag: str) -> str:
-        pattern = rf"==={re.escape(tag)}===\s*(.*?)(?=====[A-ZА-Я\s\d]+===|$)"
+        pattern = rf"==={re.escape(tag)}===\s*(.*?)(?=====\w|$)"
         m = re.search(pattern, raw, re.DOTALL)
         return m.group(1).strip() if m else ""
 
-    sections["script"] = extract("СЦЕНАРИЙ")
-    sections["title"] = extract("ЗАГОЛОВОК")
-    sections["description"] = extract("ОПИСАНИЕ")
-    tags_raw = extract("ТЕГИ")
+    sections["script"]       = extract("SCRIPT")
+    sections["title"]        = extract("TITLE")
+    sections["description"]  = extract("DESCRIPTION")
+    tags_raw = extract("TAGS")
     sections["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]
 
     prompts = []
     for i in (1, 2, 3):
-        p = extract(f"ПРОМТ {i}")
+        p = extract(f"PROMPT{i}")
         if p:
             prompts.append(p)
     sections["thumbnail_prompts"] = prompts
 
     return sections
+
+
+def count_chars(text: str) -> int:
+    return len(text)
 
 
 def count_words(text: str) -> int:

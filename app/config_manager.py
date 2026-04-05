@@ -16,12 +16,11 @@ DEFAULTS = {
     "voice_id": "female-shaonv",
     "voice_speed": 1.0,
     "voice_volume": 1.0,
-    "script_length": 800,
+    "script_length": 8000,           # characters (not words)
+    "script_language": "English",
     "master_prompt": (
-        "Ты профессиональный сценарист YouTube-видео. "
-        "Пиши уникальный, увлекательный сценарий на русском языке, "
-        "оптимизированный под алгоритмы YouTube. "
-        "Используй разговорный стиль, держи зрителя вовлечённым."
+        "Write an engaging script about the general benefits of exercise and physical activity. "
+        "Use science-backed information. Keep the tone motivational and energetic."
     ),
     "noise_intensity": 8,
     "subtitle_font_size": 32,
@@ -29,6 +28,8 @@ DEFAULTS = {
     "subtitle_outline_color": "black",
     "subtitle_position": "bottom",
     "use_gpu": True,
+    "use_scene_detect": True,
+    "scene_threshold": 0.35,
     "min_views_filter": 100000,
     "date_filter": "all",
 }

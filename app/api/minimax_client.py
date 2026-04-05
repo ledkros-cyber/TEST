@@ -1,23 +1,85 @@
 """MiniMax Text-to-Audio API client."""
-import base64
-import json
 import os
-
 import requests
 
-MINIMAX_TTS_URL = "https://api.minimax.chat/v1/t2a_v2"
+MINIMAX_TTS_URL   = "https://api.minimax.chat/v1/t2a_v2"
+MINIMAX_VOICE_URL = "https://api.minimax.chat/v1/get_voice_list"
 
-VOICES = {
-    "female-shaonv": "Женский — Молодой (RU)",
-    "male-qn-qingse": "Мужской — Молодой (RU)",
-    "female-yujie": "Женский — Профессиональный (RU)",
-    "male-qn-jingying": "Мужской — Деловой (RU)",
-    "female-chengshu": "Женский — Зрелый (RU)",
-    "audiobook_male_1": "Мужской — Рассказчик",
-    "audiobook_female_1": "Женский — Рассказчик",
-    "English_Trustful_Man": "Мужской — English",
-    "English_ReliableMan": "Мужской — English 2",
+# Full list of known MiniMax voices (static fallback)
+VOICES: dict[str, str] = {
+    # ── Female ───────────────────────────────────────────────────────────────
+    "female-shaonv":        "Female — Young/Bright (EN/ZH)",
+    "female-yujie":         "Female — Professional (EN/ZH)",
+    "female-chengshu":      "Female — Mature/Elegant (EN/ZH)",
+    "female-tianmei":       "Female — Sweet (ZH)",
+    "Ava_multilingual":     "Ava — Multilingual Female",
+    "Serena_multilingual":  "Serena — Multilingual Female",
+    "audiobook_female_1":   "Female — Audiobook Narrator",
+    "audiobook_female_2":   "Female — Audiobook Narrator 2",
+    # ── Male ─────────────────────────────────────────────────────────────────
+    "male-qn-qingse":       "Male — Young/Casual (EN/ZH)",
+    "male-qn-jingying":     "Male — Business/Formal (EN/ZH)",
+    "male-qn-badao":        "Male — Bold/Powerful (ZH)",
+    "male-qn-daxuesheng":   "Male — Student/Friendly (ZH)",
+    "Bowen_multilingual":   "Bowen — Multilingual Male",
+    "Adam_multilingual":    "Adam — Multilingual Male",
+    "audiobook_male_1":     "Male — Audiobook Narrator",
+    "audiobook_male_2":     "Male — Audiobook Narrator 2",
+    # ── English specialist ────────────────────────────────────────────────────
+    "English_Trustful_Man": "English — Trustful Man",
+    "English_ReliableMan":  "English — Reliable Man",
+    "English_CalmWoman":    "English — Calm Woman",
+    "English_EmotionalFemale": "English — Emotional Female",
+    "English_WarmAunty":    "English — Warm Aunty",
+    # ── Multilingual ─────────────────────────────────────────────────────────
+    "Spanish_SentimentalF": "Spanish — Sentimental Female",
+    "Spanish_ExpressiveM":  "Spanish — Expressive Male",
+    "French_FriendlyF":     "French — Friendly Female",
+    "French_CharmingM":     "French — Charming Male",
+    "German_ReliableM":     "German — Reliable Male",
+    "Portuguese_CalmF":     "Portuguese — Calm Female",
+    "Russian_CalmF":        "Russian — Calm Female",
+    "Japanese_FriendlyF":   "Japanese — Friendly Female",
+    "Korean_WarmF":         "Korean — Warm Female",
 }
+
+
+def fetch_voices(api_key: str, group_id: str) -> dict[str, str]:
+    """
+    Fetch the full voice list from MiniMax API.
+    Returns dict of {voice_id: display_name}.
+    Falls back to the static VOICES dict on any error.
+    """
+    if not api_key or not group_id:
+        return VOICES
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{MINIMAX_VOICE_URL}?GroupId={group_id}"
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        result: dict[str, str] = {}
+        # MiniMax returns voice list under different possible keys
+        voice_list = (
+            data.get("voice_list")
+            or data.get("voices")
+            or data.get("data", {}).get("voice_list")
+            or []
+        )
+        for v in voice_list:
+            vid   = v.get("voice_id") or v.get("id") or ""
+            label = v.get("name") or v.get("display_name") or vid
+            if vid:
+                result[vid] = label
+
+        return result if result else VOICES
+    except Exception:
+        return VOICES
 
 
 def generate_audio(
@@ -48,25 +110,24 @@ def generate_audio(
         "stream": False,
         "voice_setting": {
             "voice_id": voice_id,
-            "speed": round(speed, 2),
-            "vol": round(volume, 2),
-            "pitch": 0,
+            "speed":    round(speed, 2),
+            "vol":      round(volume, 2),
+            "pitch":    0,
         },
         "audio_setting": {
             "sample_rate": 32000,
-            "bitrate": 128000,
-            "format": "mp3",
-            "channel": 1,
+            "bitrate":     128000,
+            "format":      "mp3",
+            "channel":     1,
         },
     }
 
     url = f"{MINIMAX_TTS_URL}?GroupId={group_id}"
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp = requests.post(url, headers=headers, json=payload, timeout=180)
     resp.raise_for_status()
 
     data = resp.json()
 
-    # Check for API-level errors
     base_resp = data.get("base_resp", {})
     if base_resp.get("status_code", 0) != 0:
         raise RuntimeError(
@@ -78,7 +139,6 @@ def generate_audio(
     if not audio_data:
         raise RuntimeError("MiniMax returned empty audio data.")
 
-    # audio is hex-encoded
     audio_bytes = bytes.fromhex(audio_data)
 
     if not output_path:
@@ -92,8 +152,8 @@ def generate_audio(
 
 
 def get_audio_duration_estimate(text: str, speed: float = 1.0) -> float:
-    """Estimate audio duration in seconds based on word count."""
+    """Estimate audio duration in seconds based on character count."""
+    # ~5 chars per word, ~140 wpm at speed 1.0
     words = len(text.split())
-    # Average speaking rate ~140 words/min at speed=1.0
     wpm = 140 * speed
     return (words / wpm) * 60

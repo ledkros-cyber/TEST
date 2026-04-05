@@ -3,11 +3,13 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QGroupBox, QFormLayout, QComboBox,
     QSpinBox, QDoubleSpinBox, QFileDialog, QScrollArea,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt
 
 from app.config_manager import load_config, save_config
 from app.api.minimax_client import VOICES
+from app.api.claude_client import LANGUAGES
 from app.ui.widgets import SectionHeader, StatusBar
 
 
@@ -31,42 +33,42 @@ class SettingsTab(QWidget):
         main.setSpacing(16)
         main.setContentsMargins(20, 16, 20, 16)
 
-        main.addWidget(SectionHeader("Настройки"))
+        main.addWidget(SectionHeader("Settings"))
 
         # --- API Keys ---
-        api_group = QGroupBox("API ключи")
+        api_group = QGroupBox("API Keys")
         api_form = QFormLayout(api_group)
         api_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         api_form.setSpacing(10)
 
-        self.yt_key = self._make_key_field(self._cfg.get("youtube_api_key", ""))
-        self.anthropic_key = self._make_key_field(self._cfg.get("anthropic_api_key", ""))
-        self.minimax_key = self._make_key_field(self._cfg.get("minimax_api_key", ""))
-        self.minimax_group = QLineEdit(self._cfg.get("minimax_group_id", ""))
+        self.yt_key          = self._make_key_field(self._cfg.get("youtube_api_key", ""))
+        self.anthropic_key   = self._make_key_field(self._cfg.get("anthropic_api_key", ""))
+        self.minimax_key     = self._make_key_field(self._cfg.get("minimax_api_key", ""))
+        self.minimax_group   = QLineEdit(self._cfg.get("minimax_group_id", ""))
         self.minimax_group.setPlaceholderText("MiniMax Group ID")
 
-        api_form.addRow("YouTube API Key:", self.yt_key)
-        api_form.addRow("Anthropic (Claude) Key:", self.anthropic_key)
-        api_form.addRow("MiniMax API Key:", self.minimax_key)
-        api_form.addRow("MiniMax Group ID:", self.minimax_group)
+        api_form.addRow("YouTube API Key:",         self.yt_key)
+        api_form.addRow("Anthropic (Claude) Key:",  self.anthropic_key)
+        api_form.addRow("MiniMax API Key:",         self.minimax_key)
+        api_form.addRow("MiniMax Group ID:",        self.minimax_group)
         main.addWidget(api_group)
 
         # --- Folders ---
-        folder_group = QGroupBox("Папки по умолчанию")
+        folder_group = QGroupBox("Default Folders")
         folder_form = QFormLayout(folder_group)
         folder_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         folder_form.setSpacing(10)
 
         self.output_folder = self._make_folder_row(
-            self._cfg.get("output_folder", ""), folder_form, "Папка для готовых видео:"
+            self._cfg.get("output_folder", ""), folder_form, "Output folder:"
         )
         self.source_folder = self._make_folder_row(
-            self._cfg.get("source_videos_folder", ""), folder_form, "Папка с исходными видео:"
+            self._cfg.get("source_videos_folder", ""), folder_form, "Source videos folder:"
         )
         main.addWidget(folder_group)
 
         # --- Video defaults ---
-        vid_group = QGroupBox("Настройки видео по умолчанию")
+        vid_group = QGroupBox("Video Defaults")
         vid_form = QFormLayout(vid_group)
         vid_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         vid_form.setSpacing(10)
@@ -90,25 +92,36 @@ class SettingsTab(QWidget):
         self.noise_spin.setValue(self._cfg.get("noise_intensity", 8))
 
         self.use_gpu_combo = QComboBox()
-        self.use_gpu_combo.addItems(["Да (NVENC — быстро)", "Нет (CPU — совместимо)"])
+        self.use_gpu_combo.addItems(["Yes (NVENC — fast)", "No (CPU — compatible)"])
         self.use_gpu_combo.setCurrentIndex(0 if self._cfg.get("use_gpu", True) else 1)
 
-        vid_form.addRow("Качество:", self.quality_combo)
-        vid_form.addRow("FPS:", self.fps_spin)
-        vid_form.addRow("Громкость фонового видео:", self.bg_vol_spin)
-        vid_form.addRow("Интенсивность шума (0=нет):", self.noise_spin)
-        vid_form.addRow("Ускорение GPU (NVENC):", self.use_gpu_combo)
+        self.scene_detect_check = QCheckBox("Enabled")
+        self.scene_detect_check.setChecked(self._cfg.get("use_scene_detect", True))
+
+        self.scene_threshold_spin = QDoubleSpinBox()
+        self.scene_threshold_spin.setRange(0.1, 0.8)
+        self.scene_threshold_spin.setSingleStep(0.05)
+        self.scene_threshold_spin.setDecimals(2)
+        self.scene_threshold_spin.setValue(self._cfg.get("scene_threshold", 0.35))
+
+        vid_form.addRow("Quality:",                  self.quality_combo)
+        vid_form.addRow("FPS:",                      self.fps_spin)
+        vid_form.addRow("Background video volume:",  self.bg_vol_spin)
+        vid_form.addRow("Noise intensity (0=off):",  self.noise_spin)
+        vid_form.addRow("GPU acceleration (NVENC):", self.use_gpu_combo)
+        vid_form.addRow("Scene detection:",          self.scene_detect_check)
+        vid_form.addRow("Scene threshold:",          self.scene_threshold_spin)
         main.addWidget(vid_group)
 
         # --- Voice defaults ---
-        voice_group = QGroupBox("Голос по умолчанию (MiniMax)")
+        voice_group = QGroupBox("Default Voice (MiniMax)")
         voice_form = QFormLayout(voice_group)
         voice_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         voice_form.setSpacing(10)
 
         self.voice_combo = QComboBox()
         for vid, label in VOICES.items():
-            self.voice_combo.addItem(label, vid)
+            self.voice_combo.addItem(f"{label}  [{vid}]", vid)
         cur_voice = self._cfg.get("voice_id", "female-shaonv")
         for i in range(self.voice_combo.count()):
             if self.voice_combo.itemData(i) == cur_voice:
@@ -121,29 +134,41 @@ class SettingsTab(QWidget):
         self.speed_spin.setDecimals(2)
         self.speed_spin.setValue(self._cfg.get("voice_speed", 1.0))
 
-        voice_form.addRow("Голос:", self.voice_combo)
-        voice_form.addRow("Скорость речи:", self.speed_spin)
+        voice_form.addRow("Voice:",        self.voice_combo)
+        voice_form.addRow("Speech speed:", self.speed_spin)
         main.addWidget(voice_group)
 
         # --- Script defaults ---
-        script_group = QGroupBox("Сценарий по умолчанию")
+        script_group = QGroupBox("Script Defaults")
         script_form = QFormLayout(script_group)
         script_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         script_form.setSpacing(10)
 
-        self.script_len_spin = QSpinBox()
-        self.script_len_spin.setRange(200, 5000)
-        self.script_len_spin.setSingleStep(50)
-        self.script_len_spin.setValue(self._cfg.get("script_length", 800))
-        self.script_len_spin.setSuffix(" слов")
+        self.lang_combo = QComboBox()
+        cur_lang = self._cfg.get("script_language", "English")
+        for lang_key in LANGUAGES:
+            self.lang_combo.addItem(lang_key, lang_key)
+        idx = self.lang_combo.findData(cur_lang)
+        if idx >= 0:
+            self.lang_combo.setCurrentIndex(idx)
 
-        script_form.addRow("Длина сценария:", self.script_len_spin)
+        self.script_len_spin = QSpinBox()
+        self.script_len_spin.setRange(1000, 20000)
+        self.script_len_spin.setSingleStep(500)
+        self.script_len_spin.setValue(self._cfg.get("script_length", 8000))
+        self.script_len_spin.setSuffix(" chars")
+        self.script_len_spin.setToolTip(
+            "Approximate: 4000 chars ≈ 3 min  |  8000 ≈ 7 min  |  12000 ≈ 10 min"
+        )
+
+        script_form.addRow("Default language:",       self.lang_combo)
+        script_form.addRow("Default script length:",  self.script_len_spin)
         main.addWidget(script_group)
 
         # --- Save button ---
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        save_btn = QPushButton("Сохранить настройки")
+        save_btn = QPushButton("Save Settings")
         save_btn.setFixedWidth(200)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
@@ -156,7 +181,7 @@ class SettingsTab(QWidget):
     def _make_key_field(self, value: str) -> QLineEdit:
         field = QLineEdit(value)
         field.setEchoMode(QLineEdit.EchoMode.Password)
-        field.setPlaceholderText("Введите ключ...")
+        field.setPlaceholderText("Enter key...")
         return field
 
     def _make_folder_row(self, value: str, form: QFormLayout, label: str) -> QLineEdit:
@@ -164,8 +189,8 @@ class SettingsTab(QWidget):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         field = QLineEdit(value)
-        field.setPlaceholderText("Путь к папке...")
-        btn = QPushButton("Обзор")
+        field.setPlaceholderText("Folder path...")
+        btn = QPushButton("Browse")
         btn.setObjectName("secondary")
         btn.setFixedWidth(70)
         btn.clicked.connect(lambda: self._browse_folder(field))
@@ -175,28 +200,31 @@ class SettingsTab(QWidget):
         return field
 
     def _browse_folder(self, field: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(self, "Выберите папку", field.text())
+        folder = QFileDialog.getExistingDirectory(self, "Select folder", field.text())
         if folder:
             field.setText(folder)
 
     def _save(self):
         cfg = load_config()
-        cfg["youtube_api_key"] = self.yt_key.text().strip()
-        cfg["anthropic_api_key"] = self.anthropic_key.text().strip()
-        cfg["minimax_api_key"] = self.minimax_key.text().strip()
-        cfg["minimax_group_id"] = self.minimax_group.text().strip()
-        cfg["output_folder"] = self.output_folder.text().strip()
+        cfg["youtube_api_key"]      = self.yt_key.text().strip()
+        cfg["anthropic_api_key"]    = self.anthropic_key.text().strip()
+        cfg["minimax_api_key"]      = self.minimax_key.text().strip()
+        cfg["minimax_group_id"]     = self.minimax_group.text().strip()
+        cfg["output_folder"]        = self.output_folder.text().strip()
         cfg["source_videos_folder"] = self.source_folder.text().strip()
-        cfg["quality"] = self.quality_combo.currentText()
-        cfg["fps"] = self.fps_spin.value()
-        cfg["bg_audio_volume"] = self.bg_vol_spin.value()
-        cfg["noise_intensity"] = self.noise_spin.value()
-        cfg["use_gpu"] = self.use_gpu_combo.currentIndex() == 0
-        cfg["voice_id"] = self.voice_combo.currentData()
-        cfg["voice_speed"] = self.speed_spin.value()
-        cfg["script_length"] = self.script_len_spin.value()
+        cfg["quality"]              = self.quality_combo.currentText()
+        cfg["fps"]                  = self.fps_spin.value()
+        cfg["bg_audio_volume"]      = self.bg_vol_spin.value()
+        cfg["noise_intensity"]      = self.noise_spin.value()
+        cfg["use_gpu"]              = self.use_gpu_combo.currentIndex() == 0
+        cfg["use_scene_detect"]     = self.scene_detect_check.isChecked()
+        cfg["scene_threshold"]      = self.scene_threshold_spin.value()
+        cfg["voice_id"]             = self.voice_combo.currentData()
+        cfg["voice_speed"]          = self.speed_spin.value()
+        cfg["script_language"]      = self.lang_combo.currentData()
+        cfg["script_length"]        = self.script_len_spin.value()
         save_config(cfg)
-        self._status.set_ok("Настройки сохранены!")
+        self._status.set_ok("Settings saved!")
 
     def get_config(self) -> dict:
         return load_config()

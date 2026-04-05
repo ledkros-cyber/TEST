@@ -13,6 +13,7 @@ from app.ui.audio_tab import AudioTab
 from app.ui.video_tab import VideoTab
 from app.ui.history_tab import HistoryTab
 from app.ui.settings_tab import SettingsTab
+from app.ui.automation_tab import AutomationTab
 from app.ui.styles import STYLESHEET
 
 
@@ -20,9 +21,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         database.init_db()
-        self.setWindowTitle("YouTube Video Generator")
-        self.setMinimumSize(1100, 750)
-        self.resize(1280, 820)
+        self.setWindowTitle("Exercise Video Generator")
+        self.setMinimumSize(1200, 800)
+        self.resize(1380, 860)
         self.setStyleSheet(STYLESHEET)
         self._build_ui()
 
@@ -40,15 +41,15 @@ class MainWindow(QMainWindow):
         tb_layout = QHBoxLayout(topbar)
         tb_layout.setContentsMargins(20, 0, 20, 0)
 
-        app_title = QLabel("▶ YouTube Video Generator")
+        app_title = QLabel("▶ Exercise Video Generator")
         app_title.setStyleSheet(
             "font-size:17px; font-weight:bold; color:#6c63ff; letter-spacing:1px;"
         )
         tb_layout.addWidget(app_title)
         tb_layout.addStretch()
 
-        subtitle = QLabel("AI-powered video creation pipeline")
-        subtitle.setStyleSheet("font-size:12px; color:#9090aa;")
+        subtitle = QLabel("AI · MiniMax TTS · FFmpeg  |  Scene Detection · Multi-language · Batch Mode")
+        subtitle.setStyleSheet("font-size:11px; color:#9090aa;")
         tb_layout.addWidget(subtitle)
         root.addWidget(topbar)
 
@@ -56,19 +57,21 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
 
-        self.search_tab = SearchTab()
-        self.script_tab = ScriptTab()
-        self.audio_tab = AudioTab()
-        self.video_tab = VideoTab()
-        self.history_tab = HistoryTab()
-        self.settings_tab = SettingsTab()
+        self.search_tab     = SearchTab()
+        self.script_tab     = ScriptTab()
+        self.audio_tab      = AudioTab()
+        self.video_tab      = VideoTab()
+        self.automation_tab = AutomationTab()
+        self.history_tab    = HistoryTab()
+        self.settings_tab   = SettingsTab()
 
-        self.tabs.addTab(self.search_tab,   "1. Поиск")
-        self.tabs.addTab(self.script_tab,   "2. Сценарий")
-        self.tabs.addTab(self.audio_tab,    "3. Озвучка")
-        self.tabs.addTab(self.video_tab,    "4. Видео")
-        self.tabs.addTab(self.history_tab,  "5. История")
-        self.tabs.addTab(self.settings_tab, "⚙ Настройки")
+        self.tabs.addTab(self.search_tab,     "1. Search")
+        self.tabs.addTab(self.script_tab,     "2. Script")
+        self.tabs.addTab(self.audio_tab,      "3. Voiceover")
+        self.tabs.addTab(self.video_tab,      "4. Video")
+        self.tabs.addTab(self.automation_tab, "⚡ Automation")
+        self.tabs.addTab(self.history_tab,    "5. History")
+        self.tabs.addTab(self.settings_tab,   "⚙ Settings")
 
         root.addWidget(self.tabs)
 
@@ -76,8 +79,9 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         status.setStyleSheet("background:#13132b; color:#9090aa; font-size:11px;")
         status.showMessage(
-            "Готово. Шаг 1: Настройте API ключи → вкладка «Настройки»."
-            "  Шаг 2: Найдите видео → вкладка «Поиск».  Шаг 3: Создайте сценарий → и т.д."
+            "Step 1: Set API keys → Settings.   "
+            "Step 2: Search YouTube (optional) → Script → Voiceover → Video.   "
+            "Or use ⚡ Automation for fully automatic batch creation."
         )
         self.setStatusBar(status)
 
@@ -86,12 +90,14 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         # Search → Script
         self.search_tab.videos_selected.connect(self._on_videos_selected)
-        # Script → Audio
+        # Script → Audio + Video
         self.script_tab.script_ready.connect(self._on_script_ready)
         # Audio → Video
         self.audio_tab.audio_ready.connect(self._on_audio_ready)
         # Video → History
         self.video_tab.video_created.connect(self._on_video_created)
+        # Automation → History
+        self.automation_tab.videos_created.connect(self._on_batch_created)
 
     def _on_videos_selected(self, videos: list):
         self.script_tab.set_source_videos(videos)
@@ -110,5 +116,13 @@ class MainWindow(QMainWindow):
         self.history_tab.add_project(project)
         self.tabs.setCurrentWidget(self.history_tab)
         self.statusBar().showMessage(
-            f"Видео #{project.get('number')} создано: {project.get('title', '')}"
+            f"Video #{project.get('number')} created: {project.get('title', '')}"
         )
+
+    def _on_batch_created(self, projects: list):
+        for project in projects:
+            if project:
+                self.history_tab.add_project(project)
+        count = len([p for p in projects if p])
+        self.statusBar().showMessage(f"Batch complete: {count} videos created.")
+        self.tabs.setCurrentWidget(self.history_tab)
