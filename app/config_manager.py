@@ -16,7 +16,7 @@ DEFAULTS = {
     "output_folder": "",
     "source_videos_folder": "",
     "quality": "1080p",
-    "fps": 60,
+    "fps": 30,                         # GTX 1650 Ti: 30fps optimal, 60fps is very slow on CPU
     "bg_audio_volume": 0.05,
     "voice_id": "female-shaonv",
     "voice_speed": 1.0,
@@ -29,12 +29,12 @@ DEFAULTS = {
         "Используй разговорный стиль, держи зрителя вовлечённым."
     ),
     "noise_intensity": 8,
-    "subtitle_font_size": 32,
+    "subtitle_font_size": 18,
     "subtitle_font_color": "white",
     "subtitle_outline_color": "black",
     "subtitle_position": "bottom",
     "use_gpu": True,
-    "parallel_workers": 3,
+    "parallel_workers": 2,             # i5-10300H + low free RAM: 2 is safer than 3
     "clip_min_dur": 3.0,
     "clip_max_dur": 5.0,
     "extra_seconds": 10.0,

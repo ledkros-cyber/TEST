@@ -340,6 +340,11 @@ def _final_render_gpu(
     # NOTE: do NOT use -hwaccel_output_format cuda here — it conflicts with
     # CPU-side filters (subtitles, noise). Use -hwaccel cuda for decode only;
     # frames are downloaded to RAM for filtering, then encoded with h264_nvenc.
+    #
+    # Tuned for GTX 1650 Ti (Lenovo Legion 5):
+    #   p3 preset = good balance of speed/quality on this GPU tier
+    #   cq 23 = good quality, faster than 20
+    #   maxrate 8M = sufficient for 1080p YouTube (they re-encode anyway)
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-hwaccel", "cuda",
@@ -347,12 +352,15 @@ def _final_render_gpu(
         "-vf", vf,
         "-map", "0:v", "-map", "1:a",
         "-af", f"volume={voice_volume:.4f}",
-        "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
-        "-rc", "vbr", "-cq", "20", "-b:v", "0",
-        "-maxrate:v", "12M" if height == 1080 else "6M",
-        "-bufsize:v", "24M" if height == 1080 else "12M",
+        "-c:v", "h264_nvenc",
+        "-preset", "p3",        # p1=fastest … p7=slowest; p3 = good for GTX 1650 Ti
+        "-tune", "hq",
+        "-rc", "vbr", "-cq", "23", "-b:v", "0",
+        "-maxrate:v", "8M" if height == 1080 else "4M",
+        "-bufsize:v", "16M" if height == 1080 else "8M",
         "-profile:v", "high", "-level", "4.2",
         "-g", str(fps * 2),
+        "-spatial-aq", "1",     # spatial AQ improves perceptual quality on GTX 1650 Ti
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
@@ -383,8 +391,9 @@ def _final_render_cpu(
         vf_parts.append(_srt_filter(srt_path))
     vf = ",".join(vf_parts)
 
-    cpu_cores = os.cpu_count() or 4
-    # Use ultrafast preset — "fast" takes 10x longer for 1080p@60fps on CPU
+    # i5-10300H: 4 cores / 8 threads — use all of them
+    cpu_cores = os.cpu_count() or 8
+    # ultrafast + tune fastdecode: optimal for i5-10300H CPU fallback
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
@@ -392,6 +401,7 @@ def _final_render_cpu(
         "-map", "0:v", "-map", "1:a",
         "-af", f"volume={voice_volume:.4f}",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-tune", "fastdecode",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
