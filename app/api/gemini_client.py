@@ -1,7 +1,6 @@
 """Google Gemini API client — drop-in alternative to claude_client.py.
 Docs: https://ai.google.dev/gemini-api/docs
 """
-import base64
 import io
 import re
 
@@ -18,9 +17,21 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Model registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ordered from most capable → least capable (used for automatic cascade)
+GEMINI_MODEL_CASCADE = [
+    "gemini-2.5-pro-preview-05-06",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+]
+
 GEMINI_MODELS = {
-    "gemini-2.5-pro-preview-05-06": "Gemini 2.5 Pro (best)",
-    "gemini-2.0-flash":             "Gemini 2.0 Flash (fast)",
+    "gemini-2.5-pro-preview-05-06": "Gemini 2.5 Pro (best quality)",
+    "gemini-2.0-flash":             "Gemini 2.0 Flash (recommended)",
     "gemini-1.5-pro":               "Gemini 1.5 Pro",
     "gemini-1.5-flash":             "Gemini 1.5 Flash (fast)",
 }
@@ -44,15 +55,17 @@ SCRIPT_SYSTEM = (
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Key helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_active_keys(cfg: dict) -> list[str]:
-    """Return all non-empty Gemini API keys from config (multi-key list + legacy single key)."""
+    """Return all non-empty Gemini API keys from config."""
     keys = []
-    # Multi-key list takes priority
     for k in cfg.get("gemini_api_keys", []):
         k = (k or "").strip()
         if k:
             keys.append(k)
-    # Fall back to single legacy key if list is empty
     if not keys:
         single = (cfg.get("gemini_api_key") or "").strip()
         if single:
@@ -65,40 +78,89 @@ def _is_quota_error(e: Exception) -> bool:
     return "quota" in msg or "429" in msg or "resource_exhausted" in msg
 
 
-def _call_with_rotation(fn, cfg: dict, *args, **kwargs):
-    """Call fn(api_key, *args, **kwargs) rotating keys on quota errors."""
+def _is_model_error(e: Exception) -> bool:
+    """404 / model not found / not supported for this API version."""
+    msg = str(e).lower()
+    return (
+        "404" in msg
+        or "not found" in msg
+        or "not supported" in msg
+        or "deprecated" in msg
+        or "invalid" in msg and "model" in msg
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cascade + rotation dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_with_cascade(fn, cfg: dict, *args, model_id: str = DEFAULT_GEMINI_MODEL, **kwargs):
+    """
+    Call fn(api_key, *args, model_id=model, **kwargs) with automatic:
+      • Model cascade  — if a model returns 404/unavailable, tries next less-capable model
+      • Key rotation   — if a key returns quota error, rotates to the next key
+    Cascade starts at `model_id` (the user's preferred model), falling back in order.
+    Stores successful model + key index back into cfg.
+    """
     keys = get_active_keys(cfg)
     if not keys:
         raise RuntimeError(
             "Gemini API key is not set.\n"
             "Go to Settings tab and enter your Google Gemini API key.\n"
-            "Get it free at: aistudio.google.com/app/apikey"
+            "Get a free key at: aistudio.google.com/app/apikey"
         )
-    start = cfg.get("gemini_key_index", 0) % len(keys)
+
+    # Build model list starting at the configured model
+    if model_id in GEMINI_MODEL_CASCADE:
+        start_model_idx = GEMINI_MODEL_CASCADE.index(model_id)
+    else:
+        start_model_idx = 0
+    models_to_try = GEMINI_MODEL_CASCADE[start_model_idx:]
+
+    start_key = cfg.get("gemini_key_index", 0) % len(keys)
     last_err = None
-    for i in range(len(keys)):
-        idx = (start + i) % len(keys)
-        key = keys[idx]
-        try:
-            result = fn(key, *args, **kwargs)
-            # Save successful key index
-            cfg["gemini_key_index"] = idx
+
+    for model in models_to_try:
+        for ki in range(len(keys)):
+            key_idx = (start_key + ki) % len(keys)
+            key = keys[key_idx]
             try:
-                from app.config_manager import save_config
-                save_config(cfg)
-            except Exception:
-                pass
-            return result
-        except Exception as e:
-            if _is_quota_error(e) and len(keys) > 1:
+                result = fn(key, *args, model_id=model, **kwargs)
+                # Persist which model/key worked
+                cfg["gemini_key_index"]       = key_idx
+                cfg["_last_gemini_model"]     = model
+                cfg["_last_gemini_key_num"]   = key_idx + 1
+                cfg["_last_gemini_key_total"] = len(keys)
+                try:
+                    from app.config_manager import save_config
+                    save_config(cfg)
+                except Exception:
+                    pass
+                return result
+            except Exception as e:
                 last_err = e
-                continue
-            raise
+                if _is_model_error(e):
+                    # This model is unavailable — skip all remaining keys for it
+                    break
+                elif _is_quota_error(e):
+                    # Quota on this key — try next key with same model
+                    continue
+                else:
+                    # Real error (auth, network, etc.) — propagate immediately
+                    raise
+
+    tried = ", ".join(models_to_try)
     raise RuntimeError(
-        f"All {len(keys)} Gemini API keys exhausted (quota exceeded).\n"
+        f"All Gemini models/keys exhausted.\n"
+        f"Models tried: {tried}\n"
+        f"Keys tried: {len(keys)}\n"
         f"Last error: {last_err}"
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal model factory
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _model(api_key: str, model_id: str):
     if not GEMINI_AVAILABLE:
@@ -114,6 +176,10 @@ def _model(api_key: str, model_id: str):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API — script generation
+# ─────────────────────────────────────────────────────────────────────────────
+
 def generate_script(
     api_key: str,
     source_videos: list[dict],
@@ -123,14 +189,18 @@ def generate_script(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> dict:
-    """Generate script via Gemini. Same return format as claude_client.generate_script.
-    If cfg is provided, key rotation across multiple accounts is used automatically."""
+    """Generate script via Gemini (same return format as claude_client).
+    If cfg is provided, model cascade + key rotation run automatically."""
     if cfg is not None:
-        return _call_with_rotation(
+        return _call_with_cascade(
             _generate_script_with_key, cfg,
-            source_videos, master_prompt, target_chars, language, model_id,
+            source_videos, master_prompt, target_chars, language,
+            model_id=model_id,
         )
-    return _generate_script_with_key(api_key, source_videos, master_prompt, target_chars, language, model_id)
+    return _generate_script_with_key(
+        api_key, source_videos, master_prompt, target_chars, language,
+        model_id=model_id,
+    )
 
 
 def _generate_script_with_key(
@@ -210,8 +280,13 @@ Reply STRICTLY in this format:
     raw = response.text
     parsed = _parse(raw)
     parsed["thumbnail_urls"] = thumbnail_urls
+    parsed["_used_model"] = model_id
     return parsed
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API — thumbnail analysis
+# ─────────────────────────────────────────────────────────────────────────────
 
 def analyze_thumbnails(
     api_key: str,
@@ -221,14 +296,17 @@ def analyze_thumbnails(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> list[str]:
-    """Analyse competitor thumbnails with Gemini Vision and return image-gen prompts.
-    If cfg is provided, key rotation across multiple accounts is used automatically."""
+    """Analyse competitor thumbnails with Gemini Vision → image-gen prompts."""
     if cfg is not None:
-        return _call_with_rotation(
+        return _call_with_cascade(
             _analyze_thumbnails_with_key, cfg,
-            thumbnail_data_list, new_title, new_description, model_id,
+            thumbnail_data_list, new_title, new_description,
+            model_id=model_id,
         )
-    return _analyze_thumbnails_with_key(api_key, thumbnail_data_list, new_title, new_description, model_id)
+    return _analyze_thumbnails_with_key(
+        api_key, thumbnail_data_list, new_title, new_description,
+        model_id=model_id,
+    )
 
 
 def _analyze_thumbnails_with_key(
@@ -276,6 +354,10 @@ def _analyze_thumbnails_with_key(
         )
     return prompts[:3]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _parse(raw: str) -> dict:
     def extract(tag: str) -> str:

@@ -18,17 +18,18 @@ def _api_generate(cfg, source_videos, master, target):
     """Route generate_script to Claude or Gemini based on config."""
     provider = cfg.get("ai_provider", "claude")
     if provider == "gemini":
-        model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        # Use cfg for key rotation; get_active_keys will raise if no keys configured
         keys = _gemini.get_active_keys(cfg)
         if not keys:
             raise RuntimeError(
                 "Gemini API key is not set.\n"
                 "Go to Settings tab and enter your Google Gemini API key.\n"
-                "Get it free at: aistudio.google.com/app/apikey"
+                "Get a free key at: aistudio.google.com/app/apikey"
             )
-        return _gemini.generate_script("", source_videos, master, target,
-                                       model_id=model_id, cfg=cfg)
+        model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
+        return _gemini.generate_script(
+            "", source_videos, master, target,
+            model_id=model_id, cfg=cfg,
+        )
     else:
         api_key = cfg.get("anthropic_api_key", "").strip()
         if not api_key:
@@ -44,8 +45,10 @@ def _api_analyze_thumbnails(cfg, pairs, title, desc):
     provider = cfg.get("ai_provider", "claude")
     if provider == "gemini":
         model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        return _gemini.analyze_thumbnails("", pairs, title, desc,
-                                          model_id=model_id, cfg=cfg)
+        return _gemini.analyze_thumbnails(
+            "", pairs, title, desc,
+            model_id=model_id, cfg=cfg,
+        )
     else:
         api_key = cfg.get("anthropic_api_key", "").strip()
         return _claude.analyze_thumbnails(api_key, pairs, title, desc)
@@ -93,6 +96,11 @@ class ScriptTab(QWidget):
         self._sources_label.setWordWrap(True)
         self._sources_label.setStyleSheet("color:#9090aa; font-size:12px;")
         cl.addWidget(self._sources_label)
+
+        self._model_label = QLabel("")
+        self._model_label.setStyleSheet("color:#6c63ff; font-size:11px; font-weight:bold;")
+        cl.addWidget(self._model_label)
+        self._update_model_label()
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Script length (characters):"))
@@ -222,6 +230,31 @@ class ScriptTab(QWidget):
         outer.addLayout(btm)
 
     # ── Actions ───────────────────────────────────────────────────────────
+    def _update_model_label(self, used_model: str = "", key_num: int = 0, key_total: int = 0):
+        cfg = load_config()
+        provider = cfg.get("ai_provider", "claude")
+        if provider == "gemini":
+            model_name = _gemini.GEMINI_MODELS.get(used_model or cfg.get("gemini_model", ""), "")
+            keys = _gemini.get_active_keys(cfg)
+            n_keys = len(keys)
+            if used_model:
+                key_info = f" | Key {key_num}/{key_total}" if key_total > 1 else ""
+                self._model_label.setText(
+                    f"AI: Gemini — {model_name or used_model}{key_info}"
+                )
+            else:
+                preferred = _gemini.GEMINI_MODELS.get(cfg.get("gemini_model", ""), cfg.get("gemini_model", ""))
+                cascade_hint = f" (+{len(_gemini.GEMINI_MODEL_CASCADE)-1} fallback models)" if len(_gemini.GEMINI_MODEL_CASCADE) > 1 else ""
+                key_hint = f", {n_keys} key(s)" if n_keys else ", no key!"
+                self._model_label.setText(
+                    f"AI: Gemini — {preferred}{cascade_hint}{key_hint}"
+                )
+        else:
+            has_key = bool(cfg.get("anthropic_api_key", "").strip())
+            self._model_label.setText(
+                f"AI: Claude (claude-opus-4-6)" + ("" if has_key else " — key not set!")
+            )
+
     def _generate(self):
         cfg = load_config()
         provider = cfg.get("ai_provider", "claude")
@@ -232,8 +265,15 @@ class ScriptTab(QWidget):
         target = self.length_spin.value()
         master = self.master_prompt.toPlainText().strip()
         self._set_busy(True)
-        label = "Gemini" if provider == "gemini" else "Claude"
-        self._status.set_info(f"Generating script ({label})...")
+        if provider == "gemini":
+            model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
+            model_name = _gemini.GEMINI_MODELS.get(model_id, model_id)
+            self._status.set_info(
+                f"Generating with Gemini — starting at {model_name} "
+                f"(auto-cascade to next model if unavailable)..."
+            )
+        else:
+            self._status.set_info("Generating script (Claude)...")
 
         self._worker = WorkerThread(
             _api_generate, cfg, self._source_videos, master, target
@@ -249,27 +289,43 @@ class ScriptTab(QWidget):
         self.title_edit.setText(data.get("title", ""))
         self.desc_edit.setText(data.get("description", ""))
         self.tags_edit.setText(", ".join(data.get("tags", [])))
-        # Clear thumbnail prompts — need fresh analysis
         for i in range(1, 4):
             getattr(self, f"prompt{i}_edit").clear()
         self._thumb_status.setText(
             "Script ready. Click 'Analyse thumbnails' to generate prompts."
         )
-        self._status.set_ok("Script generated! Review and click 'Analyse thumbnails'.")
         self._update_char_count()
+
+        # Update model info label with what was actually used
+        cfg = load_config()
+        used_model  = data.get("_used_model") or cfg.get("_last_gemini_model", "")
+        key_num     = cfg.get("_last_gemini_key_num", 1)
+        key_total   = cfg.get("_last_gemini_key_total", 1)
+        self._update_model_label(used_model, key_num, key_total)
+
+        provider = cfg.get("ai_provider", "claude")
+        if provider == "gemini" and used_model:
+            model_name = _gemini.GEMINI_MODELS.get(used_model, used_model)
+            key_info   = f" (Key {key_num}/{key_total})" if key_total > 1 else ""
+            self._status.set_ok(
+                f"Script generated via {model_name}{key_info}! "
+                "Review and click 'Analyse thumbnails'."
+            )
+        else:
+            self._status.set_ok("Script generated! Review and click 'Analyse thumbnails'.")
 
     def _analyze_thumbnails(self):
         cfg = load_config()
         provider = cfg.get("ai_provider", "claude")
         # Quick key check
-        key = (cfg.get("gemini_api_key") if provider == "gemini"
-               else cfg.get("anthropic_api_key", ""))
-        if not (key or "").strip():
-            self._status.set_error(
-                f"{'Gemini' if provider == 'gemini' else 'Claude'} API key not set. "
-                "Go to Settings."
-            )
-            return
+        if provider == "gemini":
+            if not _gemini.get_active_keys(cfg):
+                self._status.set_error("Gemini API key not set. Go to Settings.")
+                return
+        else:
+            if not cfg.get("anthropic_api_key", "").strip():
+                self._status.set_error("Claude API key not set. Go to Settings.")
+                return
         if not self._source_videos:
             self._status.set_error("No source videos loaded.")
             return

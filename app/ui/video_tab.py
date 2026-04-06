@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QSlider, QCheckBox, QFileDialog, QProgressBar, QTextEdit,
 )
 
-from app.config_manager import load_config
+from app.config_manager import load_config, save_config
 from app.processing.video_processor import VideoConfig, process_video, get_gpu_info
 from app.ui.widgets import WorkerThread, WheelSpinBox, WheelDoubleSpinBox, SectionHeader, StatusBar
 from app import database
@@ -129,7 +129,7 @@ class VideoTab(QWidget):
         row1.addWidget(QLabel("Потоков нарезки:"))
         self.workers_spin = WheelSpinBox()
         self.workers_spin.setRange(1, 8)
-        self.workers_spin.setValue(3)
+        self.workers_spin.setValue(cfg.get("parallel_workers", 3))
         self.workers_spin.setToolTip(
             "Сколько клипов нарезать параллельно.\n"
             "Для Legion RTX рекомендуется 3."
@@ -159,9 +159,10 @@ class VideoTab(QWidget):
         row2.addWidget(QLabel("Громкость голоса:"))
         self.voice_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.voice_vol_slider.setRange(0, 200)
-        self.voice_vol_slider.setValue(100)
+        voice_vol_init = cfg.get("voice_vol_percent", 100)
+        self.voice_vol_slider.setValue(voice_vol_init)
         self.voice_vol_slider.setFixedWidth(160)
-        self._voice_vol_label = QLabel("100%")
+        self._voice_vol_label = QLabel(f"{voice_vol_init}%")
         self._voice_vol_label.setFixedWidth(40)
         self.voice_vol_slider.valueChanged.connect(
             lambda v: self._voice_vol_label.setText(f"{v}%")
@@ -185,14 +186,14 @@ class VideoTab(QWidget):
         row3.addWidget(QLabel("Длина клипов (сек):"))
         self.clip_min_spin = WheelDoubleSpinBox()
         self.clip_min_spin.setRange(1.0, 10.0)
-        self.clip_min_spin.setValue(3.0)
+        self.clip_min_spin.setValue(cfg.get("clip_min_dur", 3.0))
         self.clip_min_spin.setDecimals(1)
         self.clip_min_spin.setFixedWidth(65)
         row3.addWidget(self.clip_min_spin)
         row3.addWidget(QLabel("—"))
         self.clip_max_spin = WheelDoubleSpinBox()
         self.clip_max_spin.setRange(1.0, 15.0)
-        self.clip_max_spin.setValue(5.0)
+        self.clip_max_spin.setValue(cfg.get("clip_max_dur", 5.0))
         self.clip_max_spin.setDecimals(1)
         self.clip_max_spin.setFixedWidth(65)
         row3.addWidget(self.clip_max_spin)
@@ -201,7 +202,7 @@ class VideoTab(QWidget):
         row3.addWidget(QLabel("Запас видео (сек):"))
         self.extra_spin = WheelDoubleSpinBox()
         self.extra_spin.setRange(0, 60)
-        self.extra_spin.setValue(10.0)
+        self.extra_spin.setValue(cfg.get("extra_seconds", 10.0))
         self.extra_spin.setDecimals(1)
         self.extra_spin.setFixedWidth(65)
         row3.addWidget(self.extra_spin)
@@ -291,6 +292,23 @@ class VideoTab(QWidget):
     def _get_quality(self) -> str:
         return "1080p" if "1080" in self.quality_combo.currentText() else "720p"
 
+    def save_settings(self):
+        """Persist all video tab settings to config.json."""
+        cfg = load_config()
+        cfg["quality"]           = self._get_quality()
+        cfg["fps"]               = int(self.fps_combo.currentText())
+        cfg["use_gpu"]           = self.gpu_check.isChecked()
+        cfg["parallel_workers"]  = self.workers_spin.value()
+        cfg["bg_audio_volume"]   = self.bg_vol_slider.value() / 100.0
+        cfg["bg_vol_percent"]    = self.bg_vol_slider.value()
+        cfg["voice_vol_percent"] = self.voice_vol_slider.value()
+        cfg["noise_intensity"]   = self.noise_spin.value()
+        cfg["clip_min_dur"]      = self.clip_min_spin.value()
+        cfg["clip_max_dur"]      = self.clip_max_spin.value()
+        cfg["extra_seconds"]     = self.extra_spin.value()
+        cfg["source_videos_folder"] = self.source_folder.text().strip()
+        save_config(cfg)
+
     def _render(self):
         src = self.source_folder.text().strip()
         audio = self._audio_path
@@ -327,6 +345,7 @@ class VideoTab(QWidget):
             progress_callback=self._on_progress,
         )
 
+        self.save_settings()   # persist all settings before render
         self._set_busy(True)
         self.progress.setValue(0)
         self._status.set_info("Рендеринг видео...")

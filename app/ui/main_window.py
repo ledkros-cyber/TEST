@@ -112,3 +112,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Видео #{project.get('number')} создано: {project.get('title', '')}"
         )
+
+    def closeEvent(self, event):
+        """Save all tab settings on exit so they are restored on next launch."""
+        try:
+            self.video_tab.save_settings()
+        except Exception:
+            pass
+        super().closeEvent(event)

@@ -2,8 +2,8 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QPushButton, QGroupBox, QFormLayout, QFileDialog,
-    QScrollArea, QLineEdit, QFrame,
+    QPushButton, QGroupBox, QFormLayout,
+    QScrollArea, QFrame,
 )
 
 from app.config_manager import load_config, save_config
@@ -159,25 +159,6 @@ class SettingsTab(QWidget):
         api_form.addRow("", help_lbl)
         main.addWidget(api_group)
 
-        # ── Default folders ───────────────────────────────────────────────
-        folder_group = QGroupBox("Default folders")
-        folder_form = QFormLayout(folder_group)
-        folder_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        folder_form.setSpacing(12)
-        folder_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-
-        self.output_folder = self._folder_row(
-            cfg.get("output_folder", ""),
-            folder_form, "Output folder (finished videos):"
-        )
-        self.source_folder = self._folder_row(
-            cfg.get("source_videos_folder", ""),
-            folder_form, "Source videos folder:"
-        )
-        main.addWidget(folder_group)
-
         # ── Save ─────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -256,28 +237,6 @@ class SettingsTab(QWidget):
             "" if not is_gemini else "color:#9090aa;"
         )
 
-    def _folder_row(self, value: str, form: QFormLayout, label: str) -> QLineEdit:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        field = QLineEdit(value)
-        field.setPlaceholderText("Select folder...")
-        btn = QPushButton("Browse")
-        btn.setObjectName("secondary")
-        btn.setFixedWidth(70)
-        btn.clicked.connect(lambda: self._browse(field))
-        layout.addWidget(field)
-        layout.addWidget(btn)
-        form.addRow(label, row)
-        return field
-
-    def _browse(self, field: QLineEdit):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select folder", field.text()
-        )
-        if folder:
-            field.setText(folder)
-
     def _save(self):
         cfg = load_config()
         cfg["youtube_api_key"]      = self.yt_key.text().strip()
@@ -286,9 +245,6 @@ class SettingsTab(QWidget):
         cfg["ai_provider"]          = self.provider_combo.currentData()
         cfg["minimax_api_key"]      = self.mm_key.text().strip()
         cfg["minimax_group_id"]     = self.mm_group.text().strip()
-        cfg["output_folder"]        = self.output_folder.text().strip()
-        cfg["source_videos_folder"] = self.source_folder.text().strip()
-
         # Save multi-key Gemini list (filter empty entries)
         keys = [f.text().strip() for f in self._gemini_key_fields if f.text().strip()]
         cfg["gemini_api_keys"] = keys

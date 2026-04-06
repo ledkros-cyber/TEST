@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QGroupBox, QTextEdit, QFileDialog, QProgressBar, QLineEdit,
 )
 
-from app.config_manager import load_config
+from app.config_manager import load_config, save_config
 from app.api.minimax_client import (
     generate_audio, get_audio_duration_estimate, VOICES, MODELS, DEFAULT_MODEL
 )
@@ -204,6 +204,12 @@ class AudioTab(QWidget):
             # Auto-save to internal data/audio/ folder
             os.makedirs(_AUDIO_DIR, exist_ok=True)
             out_path = os.path.join(_AUDIO_DIR, "voiceover.mp3")
+
+        # Persist audio settings before generating
+        cfg["voice_id"]     = self.voice_combo.currentData()
+        cfg["voice_speed"]  = self.speed_spin.value()
+        cfg["voice_volume"] = self.vol_spin.value()
+        save_config(cfg)
 
         self._set_busy(True)
         self._status.set_info("Generating voiceover via MiniMax...")
