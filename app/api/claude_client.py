@@ -1,4 +1,5 @@
-"""Anthropic Claude API client for script generation."""
+"""Anthropic Claude API — script generation + thumbnail vision analysis."""
+import base64
 import re
 
 try:
@@ -7,126 +8,216 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
-SCRIPT_SYSTEM = """Ты профессиональный сценарист YouTube-видео.
-Ты создаёшь уникальные, захватывающие сценарии на основе анализа конкурентов.
-Твои тексты:
-- Полностью уникальны и не копируют источники
-- Оптимизированы под алгоритмы YouTube (SEO)
-- Написаны живым разговорным языком
-- Удерживают внимание зрителя с первой секунды
-- Структурированы: крючок → основная часть → призыв к действию
+SCRIPT_SYSTEM = """You are a professional YouTube scriptwriter.
+You create unique, engaging video scripts based on competitor analysis.
+Your scripts:
+- Are 100% original and do not copy sources
+- Are SEO-optimized for YouTube
+- Use natural conversational language
+- Hook the viewer in the first 15 seconds
+- Follow structure: hook -> main content -> call to action
 """
+
+
+def _client(api_key: str):
+    if not ANTHROPIC_AVAILABLE:
+        raise RuntimeError("anthropic package is not installed.")
+    return anthropic.Anthropic(api_key=api_key)
+
 
 def generate_script(
     api_key: str,
     source_videos: list[dict],
     master_prompt: str = "",
-    target_words: int = 800,
+    target_chars: int = 3000,
     language: str = "ru",
 ) -> dict:
     """
-    Generate a script based on analysed source videos.
-    Returns dict with: script, title, description, tags, thumbnail_prompts
+    Generate script, title, description, tags (real + generated), thumbnail prompts.
+    Returns: {script, title, description, tags, thumbnail_prompts, thumbnail_urls}
     """
-    if not ANTHROPIC_AVAILABLE:
-        raise RuntimeError("anthropic package is not installed.")
+    client = _client(api_key)
 
-    client = anthropic.Anthropic(api_key=api_key)
-
+    # Collect real tags from source videos
+    all_real_tags: list[str] = []
     sources_text = ""
+    thumbnail_urls: list[str] = []
+
     for i, v in enumerate(source_videos, 1):
-        sources_text += f"\n--- Источник {i} ---\n"
-        sources_text += f"Заголовок: {v.get('title', '')}\n"
-        sources_text += f"Описание: {v.get('description', '')[:1000]}\n"
-        if v.get("tags"):
-            sources_text += f"Теги: {', '.join(v['tags'][:20])}\n"
+        sources_text += f"\n--- Source {i} ---\n"
+        sources_text += f"Title: {v.get('title', '')}\n"
+        sources_text += f"Description: {v.get('description', '')[:1200]}\n"
+        vtags = v.get("tags", [])
+        if vtags:
+            sources_text += f"Tags: {', '.join(vtags[:30])}\n"
+            all_real_tags.extend(vtags[:30])
         if v.get("transcript"):
-            sources_text += f"Субтитры (фрагмент): {v['transcript'][:2000]}\n"
+            sources_text += f"Transcript (excerpt): {v['transcript'][:2500]}\n"
+        if v.get("thumbnail"):
+            thumbnail_urls.append(v["thumbnail"])
 
-    user_prompt = f"""
-{master_prompt}
+    # Deduplicate real tags, keep up to 40
+    seen = set()
+    unique_real_tags = []
+    for t in all_real_tags:
+        tl = t.lower().strip()
+        if tl and tl not in seen:
+            seen.add(tl)
+            unique_real_tags.append(t.strip())
+    unique_real_tags = unique_real_tags[:40]
 
-ИСТОЧНИКИ ДЛЯ АНАЛИЗА:
+    user_prompt = f"""{master_prompt}
+
+COMPETITOR SOURCES TO ANALYSE:
 {sources_text}
 
-ЗАДАНИЕ:
-1. Напиши уникальный сценарий для YouTube-видео на РУССКОМ языке.
-   - Примерная длина: {target_words} слов (±10%)
-   - НЕ копируй источники — создай оригинальный контент на основе тематики
-   - Начни с сильного крючка (hook) первые 15 секунд
-   - В конце — призыв подписаться и включить уведомления
+REAL TAGS EXTRACTED FROM SOURCE VIDEOS (use these as a base, add relevant ones):
+{', '.join(unique_real_tags)}
 
-2. Придумай SEO-оптимизированный заголовок (до 70 символов)
+TASK — write in {'Russian' if language == 'ru' else 'English'} language:
 
-3. Напиши описание для видео (150-300 слов), включи ключевые слова
+1. UNIQUE SCRIPT for a YouTube video.
+   - Target length: {target_chars} characters (±10%)
+   - Do NOT copy sources — create original content on the same topic
+   - Start with a powerful hook (first 15 seconds)
+   - End with a call to subscribe and enable notifications
+   - Natural, conversational tone
 
-4. Предложи 15-20 тегов через запятую
+2. SEO-OPTIMISED TITLE (max 70 characters)
 
-5. Предложи 3 разных промта для генерации превью (thumbnail) — на английском языке,
-   каждый с другим визуальным стилем (реалистичный, минималистичный, яркий/кричащий)
+3. VIDEO DESCRIPTION (150-300 words with keywords)
 
-Ответ дай СТРОГО в формате:
+4. TAGS — use the real tags above as a base and supplement with relevant ones.
+   Provide 20-30 tags separated by commas.
 
-===СЦЕНАРИЙ===
-[текст сценария]
+Reply STRICTLY in this format (keep the === markers exactly):
 
-===ЗАГОЛОВОК===
-[заголовок]
+===SCRIPT===
+[script text]
 
-===ОПИСАНИЕ===
-[описание]
+===TITLE===
+[title]
 
-===ТЕГИ===
-[теги через запятую]
+===DESCRIPTION===
+[description]
 
-===ПРОМТ 1===
-[промт для превью 1]
-
-===ПРОМТ 2===
-[промт для превью 2]
-
-===ПРОМТ 3===
-[промт для превью 3]
+===TAGS===
+[tags, separated by commas]
 """
 
     message = client.messages.create(
         model="claude-opus-4-6",
-        max_tokens=4096,
+        max_tokens=6000,
         system=SCRIPT_SYSTEM,
         messages=[{"role": "user", "content": user_prompt}],
     )
     raw = message.content[0].text
-    return _parse_response(raw)
+    parsed = _parse_response(raw)
+    parsed["thumbnail_urls"] = thumbnail_urls
+    return parsed
+
+
+def analyze_thumbnails(
+    api_key: str,
+    thumbnail_data_list: list[tuple[bytes, str]],   # [(image_bytes, source_title), ...]
+    new_title: str,
+    new_description: str,
+) -> list[str]:
+    """
+    Analyse competitor thumbnail images and return image-generation prompts
+    adapted to the new video title/description.
+
+    Returns list of prompt strings (one per thumbnail, max 3).
+    """
+    client = _client(api_key)
+    prompts = []
+
+    for image_bytes, source_title in thumbnail_data_list[:3]:
+        try:
+            b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+            # Detect format
+            media_type = "image/jpeg"
+            if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                media_type = "image/png"
+            elif image_bytes[:4] == b"RIFF":
+                media_type = "image/webp"
+
+            message = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=800,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": f"""Analyse this YouTube thumbnail image carefully and then write an image generation prompt.
+
+Step 1 — Analyse the thumbnail:
+- Overall layout and composition
+- Background (color, texture, scene)
+- Main visual elements (person, objects, text, graphics)
+- Color palette and mood
+- Text overlays (font style, size, color, placement)
+- Visual effects (glow, shadows, contrasts, shapes)
+- What makes it click-worthy / eye-catching
+
+Step 2 — Write a detailed image generation prompt in English for a SIMILAR thumbnail but adapted to this NEW video:
+Title: {new_title}
+Description: {new_description[:300]}
+
+Rules for the prompt:
+- Keep the same visual style, layout, mood, and design approach as the analysed thumbnail
+- Replace the topic/content with what matches the new title
+- Make it maximally click-worthy and engaging
+- Include specific details: colors, fonts, lighting, composition, style
+- Output ONLY the image generation prompt, nothing else."""
+                        }
+                    ],
+                }],
+            )
+            prompts.append(message.content[0].text.strip())
+        except Exception as e:
+            prompts.append(f"[Thumbnail analysis failed: {e}]")
+
+    # If fewer than 3 thumbnails, add style variations
+    styles = ["photorealistic dramatic", "bold minimalist", "vibrant neon pop-art"]
+    while len(prompts) < 3:
+        idx = len(prompts)
+        prompts.append(
+            f"{styles[idx % len(styles)]} YouTube thumbnail for video titled '{new_title}', "
+            f"high contrast, attention-grabbing text overlay, professional design"
+        )
+
+    return prompts[:3]
 
 
 def _parse_response(raw: str) -> dict:
-    sections = {
-        "script": "",
-        "title": "",
-        "description": "",
-        "tags": [],
-        "thumbnail_prompts": [],
-    }
+    sections = {"script": "", "title": "", "description": "", "tags": [],
+                "thumbnail_prompts": [], "thumbnail_urls": []}
 
     def extract(tag: str) -> str:
-        pattern = rf"==={re.escape(tag)}===\s*(.*?)(?=====[A-ZА-Я\s\d]+===|$)"
+        pattern = rf"==={re.escape(tag)}===\s*(.*?)(?=====[A-ZА-Яa-zа-я\s\d]+===|$)"
         m = re.search(pattern, raw, re.DOTALL)
         return m.group(1).strip() if m else ""
 
-    sections["script"] = extract("СЦЕНАРИЙ")
-    sections["title"] = extract("ЗАГОЛОВОК")
-    sections["description"] = extract("ОПИСАНИЕ")
-    tags_raw = extract("ТЕГИ")
+    sections["script"] = extract("SCRIPT")
+    sections["title"] = extract("TITLE")
+    sections["description"] = extract("DESCRIPTION")
+    tags_raw = extract("TAGS")
     sections["tags"] = [t.strip() for t in tags_raw.split(",") if t.strip()]
-
-    prompts = []
-    for i in (1, 2, 3):
-        p = extract(f"ПРОМТ {i}")
-        if p:
-            prompts.append(p)
-    sections["thumbnail_prompts"] = prompts
-
     return sections
+
+
+def count_chars(text: str) -> int:
+    return len(text)
 
 
 def count_words(text: str) -> int:

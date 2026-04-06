@@ -3,13 +3,14 @@ import os
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QPushButton, QGroupBox, QDoubleSpinBox, QTextEdit,
+    QPushButton, QGroupBox, QTextEdit,
     QFileDialog, QProgressBar, QLineEdit,
 )
 
 from app.config_manager import load_config
 from app.api.minimax_client import generate_audio, get_audio_duration_estimate, VOICES
 from app.processing.video_processor import get_audio_duration
+from app.ui.widgets import WheelDoubleSpinBox
 from app.ui.widgets import WorkerThread, SectionHeader, StatusBar
 
 
@@ -82,7 +83,7 @@ class AudioTab(QWidget):
 
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Скорость речи:"))
-        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin = WheelDoubleSpinBox()
         self.speed_spin.setRange(0.5, 2.0)
         self.speed_spin.setSingleStep(0.05)
         self.speed_spin.setDecimals(2)
@@ -93,7 +94,7 @@ class AudioTab(QWidget):
 
         row2.addSpacing(24)
         row2.addWidget(QLabel("Громкость голоса:"))
-        self.vol_spin = QDoubleSpinBox()
+        self.vol_spin = WheelDoubleSpinBox()
         self.vol_spin.setRange(0.1, 2.0)
         self.vol_spin.setSingleStep(0.05)
         self.vol_spin.setDecimals(2)

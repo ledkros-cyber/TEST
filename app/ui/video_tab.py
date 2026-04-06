@@ -3,13 +3,13 @@ import os
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox,
+    QPushButton, QGroupBox, QComboBox,
     QSlider, QCheckBox, QFileDialog, QProgressBar, QTextEdit,
 )
 
 from app.config_manager import load_config
 from app.processing.video_processor import VideoConfig, process_video, get_gpu_info
-from app.ui.widgets import WorkerThread, SectionHeader, StatusBar
+from app.ui.widgets import WorkerThread, WheelSpinBox, WheelDoubleSpinBox, SectionHeader, StatusBar
 from app import database
 
 
@@ -115,7 +115,7 @@ class VideoTab(QWidget):
 
         row1.addSpacing(20)
         row1.addWidget(QLabel("Потоков нарезки:"))
-        self.workers_spin = QSpinBox()
+        self.workers_spin = WheelSpinBox()
         self.workers_spin.setRange(1, 8)
         self.workers_spin.setValue(3)
         self.workers_spin.setToolTip(
@@ -162,7 +162,7 @@ class VideoTab(QWidget):
         # Noise & clip length
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Шум/зернистость:"))
-        self.noise_spin = QSpinBox()
+        self.noise_spin = WheelSpinBox()
         self.noise_spin.setRange(0, 30)
         self.noise_spin.setValue(cfg.get("noise_intensity", 8))
         self.noise_spin.setFixedWidth(65)
@@ -171,14 +171,14 @@ class VideoTab(QWidget):
 
         row3.addSpacing(20)
         row3.addWidget(QLabel("Длина клипов (сек):"))
-        self.clip_min_spin = QDoubleSpinBox()
+        self.clip_min_spin = WheelDoubleSpinBox()
         self.clip_min_spin.setRange(1.0, 10.0)
         self.clip_min_spin.setValue(3.0)
         self.clip_min_spin.setDecimals(1)
         self.clip_min_spin.setFixedWidth(65)
         row3.addWidget(self.clip_min_spin)
         row3.addWidget(QLabel("—"))
-        self.clip_max_spin = QDoubleSpinBox()
+        self.clip_max_spin = WheelDoubleSpinBox()
         self.clip_max_spin.setRange(1.0, 15.0)
         self.clip_max_spin.setValue(5.0)
         self.clip_max_spin.setDecimals(1)
@@ -187,7 +187,7 @@ class VideoTab(QWidget):
 
         row3.addSpacing(20)
         row3.addWidget(QLabel("Запас видео (сек):"))
-        self.extra_spin = QDoubleSpinBox()
+        self.extra_spin = WheelDoubleSpinBox()
         self.extra_spin.setRange(0, 60)
         self.extra_spin.setValue(10.0)
         self.extra_spin.setDecimals(1)
