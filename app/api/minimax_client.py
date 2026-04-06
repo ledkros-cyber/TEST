@@ -3,22 +3,21 @@ Official docs: https://platform.minimax.io/docs/llms.txt
 
 Authentication:
   Header: Authorization: Bearer {API_KEY}
-  GroupId: required for most accounts — pass as URL param ?GroupId=XXX
+  GroupId: required — pass as URL query param ?GroupId=XXX
 
-Endpoint strategy (tried in order):
-  If GroupId is set:
-    1. api.minimax.io  + GroupId  (most reliable)
-    2. api.minimax.io  (no GroupId)
-    3. api.minimax.chat + GroupId
-  If GroupId is NOT set:
-    1. api.minimax.io  (no GroupId)
-    2. show hint to add GroupId
+Endpoint strategy:
+  Chinese accounts (group_id ≥ 16 digits)  → .chat first, then .io
+  International accounts (short group_id)   → .io first, then .chat
+  Also tries old /v1/t2a endpoint as last resort.
 """
 import os
 import requests
 
 _BASE_IO   = "https://api.minimax.io/v1/t2a_v2"
 _BASE_CHAT = "https://api.minimax.chat/v1/t2a_v2"
+# Fallback: older T2A endpoint (v1, non-v2)
+_BASE_IO_V1   = "https://api.minimax.io/v1/t2a"
+_BASE_CHAT_V1 = "https://api.minimax.chat/v1/t2a"
 
 # Models (newest first)
 MODELS = {
@@ -69,15 +68,42 @@ VOICES = {
 }
 
 
+def _is_chinese_account(group_id: str) -> bool:
+    """Chinese MiniMax accounts have 16+ digit numeric GroupIDs."""
+    return group_id.isdigit() and len(group_id) >= 16
+
+
 def _build_endpoints(group_id: str) -> list[str]:
-    """Return list of URLs to try, most-likely-to-work first."""
-    urls = []
-    if group_id:
-        urls.append(f"{_BASE_IO}?GroupId={group_id}")   # .io + GroupId (best chance)
-    urls.append(_BASE_IO)                                # .io  no GroupId
-    if group_id:
-        urls.append(f"{_BASE_CHAT}?GroupId={group_id}") # .chat + GroupId (fallback)
-    return urls
+    """Return list of URLs to try, most-likely-to-work first.
+
+    Chinese accounts  → .chat first (their region), then .io
+    International     → .io first, then .chat
+    Also tries old T2A v1 endpoints as last resort.
+    """
+    gid = group_id.strip() if group_id else ""
+
+    if gid:
+        if _is_chinese_account(gid):
+            # Chinese account: .chat is the primary endpoint
+            return [
+                f"{_BASE_CHAT}?GroupId={gid}",   # China primary
+                f"{_BASE_IO}?GroupId={gid}",      # international fallback
+                f"{_BASE_CHAT_V1}?GroupId={gid}", # old v1 China
+                f"{_BASE_IO_V1}?GroupId={gid}",   # old v1 international
+            ]
+        else:
+            # International account
+            return [
+                f"{_BASE_IO}?GroupId={gid}",      # international primary
+                f"{_BASE_CHAT}?GroupId={gid}",    # China fallback
+                f"{_BASE_IO_V1}?GroupId={gid}",   # old v1
+            ]
+    else:
+        # No GroupId — try without it on both hosts
+        return [
+            _BASE_IO,
+            _BASE_CHAT,
+        ]
 
 
 def generate_audio(
@@ -200,21 +226,24 @@ def generate_audio(
     attempts = "\n".join(f"  • {e}" for e in errors)
 
     if got_auth_error:
+        is_cn = _is_chinese_account(group_id)
         gid_hint = (
-            f"\n  Group ID used: {group_id}" if group_id
-            else "\n  Group ID: NOT SET (this may be the cause!)"
+            f"\n  Group ID used: {group_id} ({'Chinese account detected' if is_cn else 'international format'})"
+            if group_id
+            else "\n  Group ID: NOT SET — required for most accounts!"
         )
         raise RuntimeError(
             f"MiniMax authentication failed (error 2049).\n\n"
             f"Key used (last 6 chars): {key_hint}  |  length: {len(api_key)}"
             f"{gid_hint}\n\n"
-            f"What to check:\n"
-            f"  1. Log in to platform.minimax.io\n"
-            f"  2. Go to Account → API Keys — copy the key EXACTLY (no spaces)\n"
-            f"  3. Go to Account → Group Info — copy the Group ID number\n"
-            f"  4. In Settings tab: paste both the API Key AND the Group ID\n"
-            f"  5. Click the 👁 button to verify what is saved matches the site\n\n"
-            f"All attempts made:\n{attempts}"
+            f"Most common causes:\n"
+            f"  A) Wrong API key — log in to platform.minimax.io → Account → API Keys\n"
+            f"     Copy the key EXACTLY (it should start with 'eyJ...')\n"
+            f"  B) Key has no T2A permission — check the key's permissions\n"
+            f"     on platform.minimax.io → Account → API Keys → Edit\n"
+            f"  C) Group ID mismatch — Account → Group Info → copy the number\n\n"
+            f"Tried all {len(endpoints)} endpoints — all rejected the key.\n"
+            f"All attempts:\n{attempts}"
         )
 
     raise RuntimeError(
