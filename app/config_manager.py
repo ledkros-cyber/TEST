@@ -9,7 +9,7 @@ DEFAULTS = {
     "gemini_api_key": "",
     "gemini_api_keys": [],            # list of up to 10 Gemini API keys for rotation
     "gemini_key_index": 0,            # current active key index
-    "gemini_model": "gemini-2.5-pro",
+    "gemini_model": "gemini-3.1-flash-preview",
     "ai_provider": "claude",          # "claude" or "gemini"
     "minimax_api_key": "",
     "minimax_group_id": "",
@@ -49,6 +49,12 @@ DEFAULTS = {
 }
 
 
+LEGACY_MODELS = {
+    "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+    "gemini-2.5-pro", "gemini-pro", "gemini-ultra",
+}
+
+
 def load_config() -> dict:
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
@@ -60,6 +66,9 @@ def load_config() -> dict:
     for k, v in DEFAULTS.items():
         if k not in data:
             data[k] = v
+    # Reset stale/deprecated model to the current default
+    if data.get("gemini_model") in LEGACY_MODELS:
+        data["gemini_model"] = DEFAULTS["gemini_model"]
     return data
 
 

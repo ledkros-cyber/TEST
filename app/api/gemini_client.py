@@ -12,19 +12,26 @@ import requests
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODEL_PREFERENCE = [
-    # Gemini 3.x — newest generation
+    # Gemini 3.1
     "gemini-3.1-pro",
+    "gemini-3.1-pro-preview",
     "gemini-3.1-flash",
+    "gemini-3.1-flash-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-flash-image-preview",
+    # Gemini 3.0
     "gemini-3-pro",
     "gemini-3-pro-preview",
-    "gemini-3.1-flash-image-preview",
-    "gemini-3-flash-preview",
     "gemini-3-flash",
-    # Gemini 2.x
+    "gemini-3-flash-preview",
+    # Gemini 2.5
     "gemini-2.5-pro",
     "gemini-2.5-pro-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-preview",
+    "gemini-2.5-flash-lite",
+    # Gemini 2.0
     "gemini-2.0-pro",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
@@ -34,30 +41,36 @@ _MODEL_PREFERENCE = [
     "gemini-1.5-flash-8b",
 ]
 
-# Fallback cascade used only when ListModels API call fails entirely
+# Fallback cascade — used ONLY when ListModels API call itself fails (network error etc.)
+# Listed from newest to oldest so the first working one gets used
 _FALLBACK_CASCADE = [
+    "gemini-3.1-flash-preview",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-flash",
     "gemini-2.5-pro",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash",
 ]
 
 # Display names for known models (shown in UI)
 GEMINI_MODELS = {
-    "gemini-3.1-pro":               "Gemini 3.1 Pro — Latest flagship",
-    "gemini-3.1-flash":             "Gemini 3.1 Flash — Fast & capable",
+    "gemini-3.1-pro":               "Gemini 3.1 Pro",
+    "gemini-3.1-pro-preview":       "Gemini 3.1 Pro Preview — Latest flagship",
+    "gemini-3.1-flash":             "Gemini 3.1 Flash",
+    "gemini-3.1-flash-preview":     "Gemini 3.1 Flash Preview — Fast & capable",
+    "gemini-3.1-flash-lite":        "Gemini 3.1 Flash Lite",
+    "gemini-3.1-flash-lite-preview": "Gemini 3.1 Flash Lite Preview",
     "gemini-3-pro-preview":         "Gemini 3 Pro Preview",
     "gemini-3-flash-preview":       "Gemini 3 Flash Preview",
     "gemini-3-flash":               "Gemini 3 Flash",
-    "gemini-2.5-pro":               "Gemini 2.5 Pro — Large context window",
-    "gemini-2.5-flash":             "Gemini 2.5 Flash — Fast & cost-effective",
+    "gemini-2.5-pro":               "Gemini 2.5 Pro",
+    "gemini-2.5-flash":             "Gemini 2.5 Flash",
     "gemini-2.5-flash-preview":     "Gemini 2.5 Flash Preview",
     "gemini-2.0-flash":             "Gemini 2.0 Flash",
     "gemini-1.5-pro":               "Gemini 1.5 Pro",
     "gemini-1.5-flash":             "Gemini 1.5 Flash",
 }
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"   # safe starting point
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-preview"   # currently most widely available
 
 MAX_GEMINI_KEYS = 10
 
