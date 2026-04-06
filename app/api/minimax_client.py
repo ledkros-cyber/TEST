@@ -2,7 +2,13 @@
 import os
 import requests
 
-MINIMAX_TTS_URL = "https://api.minimax.chat/v1/t2a_v2"
+# minimax.io  = international (most users outside China)
+# minimax.chat = China region
+# We try .io first, fall back to .chat
+MINIMAX_URLS = [
+    "https://api.minimax.io/v1/t2a_v2",
+    "https://api.minimax.chat/v1/t2a_v2",
+]
 
 # Full voice catalogue — English first, then Russian/multilingual
 VOICES = {
@@ -55,10 +61,14 @@ def generate_audio(
     output_path: str = "",
 ) -> str:
     """Send text to MiniMax TTS and save the audio file. Returns path."""
+    # Strip any accidental whitespace/newlines from credentials
+    api_key  = api_key.strip()
+    group_id = group_id.strip()
+
     if not api_key:
-        raise RuntimeError("MiniMax API key is not set.")
+        raise RuntimeError("MiniMax API key is not set. Go to Settings tab.")
     if not group_id:
-        raise RuntimeError("MiniMax Group ID is not set.")
+        raise RuntimeError("MiniMax Group ID is not set. Go to Settings tab.")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -82,40 +92,60 @@ def generate_audio(
         },
     }
 
-    url = f"{MINIMAX_TTS_URL}?GroupId={group_id}"
-    resp = requests.post(url, headers=headers, json=payload, timeout=180)
+    # Try international endpoint first, then China region
+    last_error = None
+    for base_url in MINIMAX_URLS:
+        url = f"{base_url}?GroupId={group_id}"
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=180)
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Connection failed to {base_url}: {e}"
+            continue
 
-    # Surface HTTP errors clearly
-    try:
-        resp.raise_for_status()
-    except Exception:
-        raise RuntimeError(
-            f"MiniMax HTTP {resp.status_code}: {resp.text[:500]}"
-        )
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "MiniMax: invalid API key (401). "
+                "Check your API key in Settings — use the 👁 button to verify it."
+            )
+        if resp.status_code != 200:
+            last_error = f"HTTP {resp.status_code} from {base_url}: {resp.text[:300]}"
+            continue
 
-    data = resp.json()
-    base_resp = data.get("base_resp", {})
-    status_code = base_resp.get("status_code", 0)
-    if status_code != 0:
-        raise RuntimeError(
-            f"MiniMax API error {status_code}: "
-            f"{base_resp.get('status_msg', 'Unknown error')}"
-        )
+        data = resp.json()
+        base_resp  = data.get("base_resp", {})
+        status_code = base_resp.get("status_code", 0)
 
-    audio_hex = data.get("data", {}).get("audio", "")
-    if not audio_hex:
-        raise RuntimeError("MiniMax returned empty audio data.")
+        if status_code == 2049:
+            raise RuntimeError(
+                "MiniMax error 2049: invalid API key.\n"
+                "Fix: go to Settings tab, click 👁 next to MiniMax API Key "
+                "and make sure it matches exactly what is shown on minimax.io "
+                "(no extra spaces, no quotes)."
+            )
+        if status_code != 0:
+            last_error = (
+                f"MiniMax API error {status_code}: "
+                f"{base_resp.get('status_msg', 'Unknown error')} "
+                f"(endpoint: {base_url})"
+            )
+            continue
 
-    audio_bytes = bytes.fromhex(audio_hex)
+        audio_hex = data.get("data", {}).get("audio", "")
+        if not audio_hex:
+            raise RuntimeError("MiniMax returned empty audio data.")
 
-    if not output_path:
-        output_path = os.path.join(os.getcwd(), "output_audio.mp3")
+        # Success — decode and save
+        audio_bytes = bytes.fromhex(audio_hex)
+        if not output_path:
+            output_path = os.path.join(os.getcwd(), "output_audio.mp3")
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return output_path
 
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(audio_bytes)
-
-    return output_path
+    raise RuntimeError(
+        f"MiniMax TTS failed on all endpoints.\nLast error: {last_error}"
+    )
 
 
 def get_audio_duration_estimate(text: str, speed: float = 1.0) -> float:
