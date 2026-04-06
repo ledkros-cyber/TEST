@@ -1,35 +1,43 @@
-' VideoGenerator.vbs — тихий запуск программы (без чёрного окна)
+' VideoGenerator.vbs - silent launcher (no black console window)
 Option Explicit
 
-Dim shell, appDir, venvPython, mainPy
+Dim shell, fso, appDir, venvPython, mainPy, venvPath
 
 Set shell = CreateObject("WScript.Shell")
+Set fso   = CreateObject("Scripting.FileSystemObject")
 
-' Папка, где лежит этот .vbs файл
-appDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
+appDir  = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
+mainPy  = appDir & "main.py"
 
-venvPython = appDir & "venv\Scripts\pythonw.exe"
-mainPy     = appDir & "main.py"
+' Check if venv was installed to a custom path (non-ASCII app dir case)
+Dim venvPathFile
+venvPathFile = appDir & "venv_path.txt"
 
-' Проверяем, установлена ли программа
-Dim fso
-Set fso = CreateObject("Scripting.FileSystemObject")
+If fso.FileExists(venvPathFile) Then
+    Dim ts
+    Set ts = fso.OpenTextFile(venvPathFile, 1)
+    venvPath = Trim(ts.ReadAll())
+    ts.Close
+    venvPython = venvPath & "\Scripts\pythonw.exe"
+Else
+    venvPython = appDir & "venv\Scripts\pythonw.exe"
+End If
 
 If Not fso.FileExists(venvPython) Then
-    MsgBox "Программа не установлена." & vbCrLf & vbCrLf & _
-           "Запустите SETUP.bat для установки.", _
+    MsgBox "Program is not installed." & vbCrLf & vbCrLf & _
+           "Please run SETUP.bat first.", _
            vbCritical + vbOKOnly, "YouTube Video Generator"
     WScript.Quit
 End If
 
 If Not fso.FileExists(mainPy) Then
-    MsgBox "Файл main.py не найден." & vbCrLf & _
-           "Убедитесь, что все файлы программы на месте.", _
+    MsgBox "File main.py not found." & vbCrLf & _
+           "Make sure all program files are present.", _
            vbCritical + vbOKOnly, "YouTube Video Generator"
     WScript.Quit
 End If
 
-' Запускаем программу тихо (0 = скрытое окно)
+' Launch silently (0 = hidden window)
 shell.Run """" & venvPython & """ """ & mainPy & """", 0, False
 
 Set shell = Nothing
