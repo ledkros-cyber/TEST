@@ -1,27 +1,33 @@
-"""Google Gemini API client — drop-in alternative to claude_client.py.
+"""Google Gemini API client — uses new google-genai SDK (v1 API, not v1beta).
+Install: pip install google-genai
 Docs: https://ai.google.dev/gemini-api/docs
 """
 import io
 import re
 
+# ── New SDK (google-genai, v1 API) ────────────────────────────────────────────
 try:
-    import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    from google import genai
+    from google.genai import types as genai_types
     GEMINI_AVAILABLE = True
+    GEMINI_SDK = "new"
 except ImportError:
     GEMINI_AVAILABLE = False
+    GEMINI_SDK = "none"
 
+# ── Pillow for Vision ─────────────────────────────────────────────────────────
 try:
     from PIL import Image as PILImage
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Ordered from most capable → least capable (used for automatic cascade)
+# Cascade order: most capable → least capable
 GEMINI_MODEL_CASCADE = [
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.0-flash",
@@ -39,14 +45,6 @@ DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 MAX_GEMINI_KEYS = 10
 
-# Relax safety filters so creative/marketing content isn't blocked
-_SAFETY = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-} if GEMINI_AVAILABLE else {}
-
 SCRIPT_SYSTEM = (
     "You are a professional YouTube scriptwriter. "
     "Create unique, engaging scripts based on competitor analysis. "
@@ -60,7 +58,6 @@ SCRIPT_SYSTEM = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_active_keys(cfg: dict) -> list[str]:
-    """Return all non-empty Gemini API keys from config."""
     keys = []
     for k in cfg.get("gemini_api_keys", []):
         k = (k or "").strip()
@@ -79,14 +76,13 @@ def _is_quota_error(e: Exception) -> bool:
 
 
 def _is_model_error(e: Exception) -> bool:
-    """404 / model not found / not supported for this API version."""
     msg = str(e).lower()
     return (
         "404" in msg
         or "not found" in msg
         or "not supported" in msg
         or "deprecated" in msg
-        or "invalid" in msg and "model" in msg
+        or ("invalid" in msg and "model" in msg)
     )
 
 
@@ -94,29 +90,27 @@ def _is_model_error(e: Exception) -> bool:
 # Cascade + rotation dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_with_cascade(fn, cfg: dict, *args, model_id: str = DEFAULT_GEMINI_MODEL, **kwargs):
+def _call_with_cascade(fn, cfg: dict, *args,
+                       model_id: str = DEFAULT_GEMINI_MODEL, **kwargs):
     """
-    Call fn(api_key, *args, model_id=model, **kwargs) with automatic:
-      • Model cascade  — if a model returns 404/unavailable, tries next less-capable model
-      • Key rotation   — if a key returns quota error, rotates to the next key
-    Cascade starts at `model_id` (the user's preferred model), falling back in order.
-    Stores successful model + key index back into cfg.
+    Try models from most→least capable, rotating keys on quota errors.
+    - Quota error  → rotate to next key (same model)
+    - Model 404    → skip to next model (try all keys first)
+    - Other error  → raise immediately
     """
     keys = get_active_keys(cfg)
     if not keys:
         raise RuntimeError(
             "Gemini API key is not set.\n"
-            "Go to Settings tab and enter your Google Gemini API key.\n"
-            "Get a free key at: aistudio.google.com/app/apikey"
+            "Go to Settings tab → enter your Gemini key.\n"
+            "Free key: aistudio.google.com/app/apikey"
         )
 
-    # Build model list starting at the configured model
-    if model_id in GEMINI_MODEL_CASCADE:
-        start_model_idx = GEMINI_MODEL_CASCADE.index(model_id)
-    else:
-        start_model_idx = 0
-    models_to_try = GEMINI_MODEL_CASCADE[start_model_idx:]
-
+    start_idx = (
+        GEMINI_MODEL_CASCADE.index(model_id)
+        if model_id in GEMINI_MODEL_CASCADE else 0
+    )
+    models_to_try = GEMINI_MODEL_CASCADE[start_idx:]
     start_key = cfg.get("gemini_key_index", 0) % len(keys)
     last_err = None
 
@@ -126,7 +120,6 @@ def _call_with_cascade(fn, cfg: dict, *args, model_id: str = DEFAULT_GEMINI_MODE
             key = keys[key_idx]
             try:
                 result = fn(key, *args, model_id=model, **kwargs)
-                # Persist which model/key worked
                 cfg["gemini_key_index"]       = key_idx
                 cfg["_last_gemini_model"]     = model
                 cfg["_last_gemini_key_num"]   = key_idx + 1
@@ -140,40 +133,34 @@ def _call_with_cascade(fn, cfg: dict, *args, model_id: str = DEFAULT_GEMINI_MODE
             except Exception as e:
                 last_err = e
                 if _is_model_error(e):
-                    # This model is unavailable — skip all remaining keys for it
-                    break
+                    break        # model unavailable — skip all keys, try next model
                 elif _is_quota_error(e):
-                    # Quota on this key — try next key with same model
-                    continue
+                    continue     # quota — try next key
                 else:
-                    # Real error (auth, network, etc.) — propagate immediately
-                    raise
+                    raise        # auth error, network, etc. — propagate
 
     tried = ", ".join(models_to_try)
     raise RuntimeError(
         f"All Gemini models/keys exhausted.\n"
         f"Models tried: {tried}\n"
         f"Keys tried: {len(keys)}\n"
-        f"Last error: {last_err}"
+        f"Last error: {last_err}\n\n"
+        f"Tip: verify your key at aistudio.google.com/app/apikey"
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal model factory
+# Internal — build a client (new SDK uses v1 REST API, not v1beta)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _model(api_key: str, model_id: str):
+def _client(api_key: str):
     if not GEMINI_AVAILABLE:
         raise RuntimeError(
-            "google-generativeai is not installed.\n"
-            "Run: pip install google-generativeai"
+            "google-genai is not installed.\n"
+            "Run: pip install google-genai\n"
+            "Or re-run SETUP.bat to update dependencies."
         )
-    genai.configure(api_key=api_key.strip())
-    return genai.GenerativeModel(
-        model_name=model_id,
-        system_instruction=SCRIPT_SYSTEM,
-        safety_settings=_SAFETY,
-    )
+    return genai.Client(api_key=api_key.strip())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,8 +176,6 @@ def generate_script(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> dict:
-    """Generate script via Gemini (same return format as claude_client).
-    If cfg is provided, model cascade + key rotation run automatically."""
     if cfg is not None:
         return _call_with_cascade(
             _generate_script_with_key, cfg,
@@ -211,7 +196,7 @@ def _generate_script_with_key(
     language: str = "ru",
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> dict:
-    m = _model(api_key, model_id)
+    client = _client(api_key)
 
     all_real_tags: list[str] = []
     sources_text = ""
@@ -230,8 +215,8 @@ def _generate_script_with_key(
         if v.get("thumbnail"):
             thumbnail_urls.append(v["thumbnail"])
 
-    seen = set()
-    unique_tags = []
+    seen: set[str] = set()
+    unique_tags: list[str] = []
     for t in all_real_tags:
         tl = t.lower().strip()
         if tl and tl not in seen:
@@ -276,7 +261,16 @@ Reply STRICTLY in this format:
 [tags]
 """
 
-    response = m.generate_content(prompt)
+    response = client.models.generate_content(
+        model=model_id,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=SCRIPT_SYSTEM,
+            temperature=0.85,
+            max_output_tokens=8192,
+        ),
+    )
+
     raw = response.text
     parsed = _parse(raw)
     parsed["thumbnail_urls"] = thumbnail_urls
@@ -296,7 +290,6 @@ def analyze_thumbnails(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> list[str]:
-    """Analyse competitor thumbnails with Gemini Vision → image-gen prompts."""
     if cfg is not None:
         return _call_with_cascade(
             _analyze_thumbnails_with_key, cfg,
@@ -316,19 +309,14 @@ def _analyze_thumbnails_with_key(
     new_description: str,
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> list[str]:
-    if not PIL_AVAILABLE:
-        raise RuntimeError("Pillow is not installed. Run: pip install Pillow")
+    client = _client(api_key)
 
-    genai.configure(api_key=api_key.strip())
-    vision_model = genai.GenerativeModel(
-        model_name=model_id,
-        safety_settings=_SAFETY,
-    )
-
-    prompts = []
+    prompts: list[str] = []
     for image_bytes, _ in thumbnail_data_list[:3]:
         try:
-            pil_img = PILImage.open(io.BytesIO(image_bytes))
+            image_part = genai_types.Part.from_bytes(
+                data=image_bytes, mime_type="image/jpeg"
+            )
             prompt_text = (
                 f"Analyse this YouTube thumbnail carefully.\n\n"
                 f"Describe: layout, background, main elements, color palette, "
@@ -340,10 +328,13 @@ def _analyze_thumbnails_with_key(
                 f"Keep the same visual style, mood and design approach.\n"
                 f"Output ONLY the image generation prompt, nothing else."
             )
-            resp = vision_model.generate_content([prompt_text, pil_img])
+            resp = client.models.generate_content(
+                model=model_id,
+                contents=[prompt_text, image_part],
+            )
             prompts.append(resp.text.strip())
         except Exception as e:
-            prompts.append(f"[Gemini thumbnail analysis failed: {e}]")
+            prompts.append(f"[Thumbnail analysis failed: {e}]")
 
     styles = ["photorealistic dramatic", "bold minimalist", "vibrant neon pop-art"]
     while len(prompts) < 3:
