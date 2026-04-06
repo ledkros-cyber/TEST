@@ -141,22 +141,7 @@ class VideoTab(QWidget):
 
         # Audio volumes
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Громкость фона (видео):"))
-        self.bg_vol_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bg_vol_slider.setRange(0, 100)
-        bg_vol_init = int(cfg.get("bg_audio_volume", 0.05) * 100)
-        self.bg_vol_slider.setValue(bg_vol_init)
-        self.bg_vol_slider.setFixedWidth(160)
-        self._bg_vol_label = QLabel(f"{bg_vol_init}%")
-        self._bg_vol_label.setFixedWidth(35)
-        self.bg_vol_slider.valueChanged.connect(
-            lambda v: self._bg_vol_label.setText(f"{v}%")
-        )
-        row2.addWidget(self.bg_vol_slider)
-        row2.addWidget(self._bg_vol_label)
-
-        row2.addSpacing(20)
-        row2.addWidget(QLabel("Громкость голоса:"))
+        row2.addWidget(QLabel("Громкость озвучки:"))
         self.voice_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.voice_vol_slider.setRange(0, 200)
         voice_vol_init = cfg.get("voice_vol_percent", 100)
@@ -299,8 +284,6 @@ class VideoTab(QWidget):
         cfg["fps"]               = int(self.fps_combo.currentText())
         cfg["use_gpu"]           = self.gpu_check.isChecked()
         cfg["parallel_workers"]  = self.workers_spin.value()
-        cfg["bg_audio_volume"]   = self.bg_vol_slider.value() / 100.0
-        cfg["bg_vol_percent"]    = self.bg_vol_slider.value()
         cfg["voice_vol_percent"] = self.voice_vol_slider.value()
         cfg["noise_intensity"]   = self.noise_spin.value()
         cfg["clip_min_dur"]      = self.clip_min_spin.value()
@@ -333,7 +316,6 @@ class VideoTab(QWidget):
             output_path=out,
             quality=self._get_quality(),
             fps=int(self.fps_combo.currentText()),
-            bg_volume=self.bg_vol_slider.value() / 100.0,
             voice_volume=self.voice_vol_slider.value() / 100.0,
             noise_intensity=self.noise_spin.value(),
             clip_min_dur=self.clip_min_spin.value(),

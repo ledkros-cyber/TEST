@@ -272,7 +272,7 @@ def _srt_filter(srt_path: str) -> str:
 def _final_render_gpu(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
-    noise: int, bg_volume: float, voice_volume: float,
+    noise: int, voice_volume: float,
     srt_path: Optional[str],
 ):
     vf_parts = []
@@ -285,20 +285,15 @@ def _final_render_gpu(
     vf_parts.append(f"fps={fps}")
     vf = ",".join(vf_parts)
 
-    filter_complex = (
-        f"[0:a]volume={bg_volume:.4f}[bga];"
-        f"[1:a]volume={voice_volume:.4f}[voa];"
-        f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
-    )
-
+    # Only voiceover — video audio is stripped at clip-cut stage
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
         "-extra_hw_frames", "4",
         "-i", raw_video, "-i", audio_path,
-        "-filter_complex", filter_complex,
         "-vf", vf,
-        "-map", "0:v", "-map", "[aout]",
+        "-map", "0:v", "-map", "1:a",
+        "-af", f"volume={voice_volume:.4f}",
         "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
         "-rc", "vbr", "-cq", "20", "-b:v", "0",
         "-maxrate:v", "12M" if height == 1080 else "6M",
@@ -318,7 +313,7 @@ def _final_render_gpu(
 def _final_render_cpu(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
-    noise: int, bg_volume: float, voice_volume: float,
+    noise: int, voice_volume: float,
     srt_path: Optional[str],
 ):
     vf_parts = [
@@ -328,29 +323,18 @@ def _final_render_cpu(
     ]
     if noise > 0:
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
-    # Subtitles last (after scale/pad so coordinates match final size)
     if srt_path:
         vf_parts.append(_srt_filter(srt_path))
     vf = ",".join(vf_parts)
 
     cpu_cores = os.cpu_count() or 4
-
-    if _has_audio_stream(raw_video):
-        filter_complex = (
-            f"[0:a]volume={bg_volume:.4f}[bga];"
-            f"[1:a]volume={voice_volume:.4f}[voa];"
-            f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
-        )
-        audio_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[aout]"]
-    else:
-        audio_args = ["-map", "0:v", "-map", "1:a",
-                      "-af", f"volume={voice_volume:.4f}"]
-
+    # Only voiceover — no background audio from clips
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
-        *audio_args,
         "-vf", vf,
+        "-map", "0:v", "-map", "1:a",
+        "-af", f"volume={voice_volume:.4f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
@@ -359,26 +343,10 @@ def _final_render_cpu(
     ], "final_render_cpu")
 
 
-def _has_audio_stream(path: str) -> bool:
-    """Return True if the file contains at least one audio stream."""
-    try:
-        result = subprocess.run(
-            [FFPROBE, "-v", "error",
-             "-select_streams", "a",
-             "-show_entries", "stream=codec_type",
-             "-of", "csv=p=0", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=10, **_POPEN_FLAGS,
-        )
-        return "audio" in result.stdout
-    except Exception:
-        return False
-
-
 def _final_render_cpu_no_subs(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
-    noise: int, bg_volume: float, voice_volume: float,
+    noise: int, voice_volume: float,
 ):
     """CPU render without subtitle filter — fallback when subtitles cause errors."""
     vf_parts = [
@@ -391,25 +359,12 @@ def _final_render_cpu_no_subs(
     vf = ",".join(vf_parts)
 
     cpu_cores = os.cpu_count() or 4
-
-    if _has_audio_stream(raw_video):
-        # Mix background audio from video + voiceover
-        filter_complex = (
-            f"[0:a]volume={bg_volume:.4f}[bga];"
-            f"[1:a]volume={voice_volume:.4f}[voa];"
-            f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
-        )
-        audio_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[aout]"]
-    else:
-        # No audio in source clips — use only voiceover
-        audio_args = ["-map", "0:v", "-map", "1:a",
-                      "-af", f"volume={voice_volume:.4f}"]
-
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
-        *audio_args,
         "-vf", vf,
+        "-map", "0:v", "-map", "1:a",
+        "-af", f"volume={voice_volume:.4f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
@@ -532,29 +487,28 @@ def process_video(config: VideoConfig) -> str:
                 _final_render_gpu(
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
-                    config.noise_intensity, config.bg_volume, config.voice_volume,
+                    config.noise_intensity, config.voice_volume,
                     srt_path,
                 )
             except Exception as e:
                 cb(63, f"NVENC не сработал ({e!s:.120}), переключаемся на CPU...")
-                use_gpu = False   # fall through to CPU below
+                use_gpu = False
 
         if not use_gpu:
             try:
                 _final_render_cpu(
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
-                    config.noise_intensity, config.bg_volume, config.voice_volume,
+                    config.noise_intensity, config.voice_volume,
                     srt_path,
                 )
             except Exception:
                 if srt_path:
-                    # Subtitles filter failed — retry without subtitles
                     cb(65, "Субтитры вызвали ошибку — рендер без субтитров...")
                     _final_render_cpu_no_subs(
                         raw_video, config.audio_path, config.output_path,
                         width, height, config.fps,
-                        config.noise_intensity, config.bg_volume, config.voice_volume,
+                        config.noise_intensity, config.voice_volume,
                     )
                 else:
                     raise
