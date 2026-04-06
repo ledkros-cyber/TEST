@@ -28,20 +28,21 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cascade order: most capable → least capable
+# If a model returns 404/unavailable it is skipped automatically.
 GEMINI_MODEL_CASCADE = [
-    "gemini-2.5-pro-preview-05-06",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
+    "gemini-2.5-pro",       # Gemini 2.5 Pro  (newest flagship)
+    "gemini-2.0-flash",     # Gemini 2.0 Flash (fast, widely available)
+    "gemini-1.5-pro",       # Gemini 1.5 Pro   (large context)
+    "gemini-1.5-flash",     # Gemini 1.5 Flash  (fast, cost-effective)
 ]
 
 GEMINI_MODELS = {
-    "gemini-2.5-pro-preview-05-06": "Gemini 2.5 Pro (best quality)",
-    "gemini-2.0-flash":             "Gemini 2.0 Flash (recommended)",
-    "gemini-1.5-pro":               "Gemini 1.5 Pro",
-    "gemini-1.5-flash":             "Gemini 1.5 Flash (fast)",
+    "gemini-2.5-pro":   "Gemini 2.5 Pro (flagship, best quality)",
+    "gemini-2.0-flash": "Gemini 2.0 Flash (recommended, fast)",
+    "gemini-1.5-pro":   "Gemini 1.5 Pro (large context window)",
+    "gemini-1.5-flash": "Gemini 1.5 Flash (fast, cost-effective)",
 }
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
 
 MAX_GEMINI_KEYS = 10
 

@@ -1,20 +1,24 @@
 """MiniMax Text-to-Audio API client.
-Based on official docs: https://platform.minimax.io/docs/llms.txt
+Official docs: https://platform.minimax.io/docs/llms.txt
+
+Authentication:
+  Header: Authorization: Bearer {API_KEY}
+  GroupId: required for most accounts — pass as URL param ?GroupId=XXX
+
+Endpoint strategy (tried in order):
+  If GroupId is set:
+    1. api.minimax.io  + GroupId  (most reliable)
+    2. api.minimax.io  (no GroupId)
+    3. api.minimax.chat + GroupId
+  If GroupId is NOT set:
+    1. api.minimax.io  (no GroupId)
+    2. show hint to add GroupId
 """
 import os
 import requests
 
-# All endpoint combinations to try, in order:
-#   (url_template, needs_group_id_in_url)
-# We try:
-#   1. api.minimax.io  WITHOUT GroupId  (recommended for international)
-#   2. api.minimax.io  WITH    GroupId  (some accounts need it even on .io)
-#   3. api.minimax.chat WITH   GroupId  (China endpoint)
-_ENDPOINTS = [
-    ("https://api.minimax.io/v1/t2a_v2",   False),
-    ("https://api.minimax.io/v1/t2a_v2",   True),    # .io + GroupId
-    ("https://api.minimax.chat/v1/t2a_v2", True),
-]
+_BASE_IO   = "https://api.minimax.io/v1/t2a_v2"
+_BASE_CHAT = "https://api.minimax.chat/v1/t2a_v2"
 
 # Models (newest first)
 MODELS = {
@@ -65,6 +69,17 @@ VOICES = {
 }
 
 
+def _build_endpoints(group_id: str) -> list[str]:
+    """Return list of URLs to try, most-likely-to-work first."""
+    urls = []
+    if group_id:
+        urls.append(f"{_BASE_IO}?GroupId={group_id}")   # .io + GroupId (best chance)
+    urls.append(_BASE_IO)                                # .io  no GroupId
+    if group_id:
+        urls.append(f"{_BASE_CHAT}?GroupId={group_id}") # .chat + GroupId (fallback)
+    return urls
+
+
 def generate_audio(
     api_key: str,
     group_id: str,
@@ -76,9 +91,8 @@ def generate_audio(
     output_path: str = "",
 ) -> str:
     """
-    Send text to MiniMax TTS and save as MP3.
-    Tries multiple endpoint + GroupId combinations automatically.
-    Returns path to saved audio file.
+    Send text to MiniMax TTS API and save result as MP3.
+    Returns the path to the saved audio file.
     """
     api_key  = (api_key  or "").strip()
     group_id = (group_id or "").strip()
@@ -89,13 +103,12 @@ def generate_audio(
             "Go to Settings tab and enter your MiniMax API key."
         )
 
-    key_hint = f"...{api_key[-6:]}" if len(api_key) > 6 else "(short key)"
+    key_hint = f"...{api_key[-6:]}" if len(api_key) > 6 else "(short key?)"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type":  "application/json",
     }
-
     payload = {
         "model": model,
         "text":  text,
@@ -114,16 +127,13 @@ def generate_audio(
         },
     }
 
+    endpoints = _build_endpoints(group_id)
     errors: list[str] = []
     got_auth_error = False
 
-    for base_url, needs_group in _ENDPOINTS:
-        # Skip GroupId variants if no GroupId was given
-        if needs_group and not group_id:
-            continue
-
-        url = f"{base_url}?GroupId={group_id}" if needs_group else base_url
-        label = f"{base_url} {'(+GroupId)' if needs_group else '(no GroupId)'}"
+    for url in endpoints:
+        label = url.split("?")[0].replace("https://", "")
+        has_gid = "GroupId" in url
 
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
@@ -134,45 +144,51 @@ def generate_audio(
             errors.append(f"Timeout [{label}]")
             continue
 
+        # HTTP 401 — key flat-out rejected by HTTP layer
         if resp.status_code == 401:
             got_auth_error = True
-            errors.append(f"HTTP 401 [{label}] — key rejected")
+            errors.append(f"HTTP 401 [{label}] — key rejected at HTTP level")
             continue
 
         if resp.status_code != 200:
-            errors.append(f"HTTP {resp.status_code} [{label}]: {resp.text[:120]}")
+            errors.append(f"HTTP {resp.status_code} [{label}]: {resp.text[:150]}")
             continue
 
         try:
             data = resp.json()
         except Exception:
-            errors.append(f"Invalid JSON [{label}]: {resp.text[:120]}")
+            errors.append(f"Bad JSON [{label}]: {resp.text[:150]}")
             continue
 
         base_resp   = data.get("base_resp", {})
         status_code = base_resp.get("status_code", 0)
-        status_msg  = base_resp.get("status_msg", "?")
+        status_msg  = base_resp.get("status_msg", "unknown")
 
+        # ── API-level errors ──────────────────────────────────────────────
         if status_code == 2049:
             got_auth_error = True
-            errors.append(f"Error 2049 (invalid key) [{label}]")
-            continue    # try other endpoint combinations before giving up
-
-        if status_code == 2013:
-            errors.append(f"Error 2013 (no GroupId required) [{label}]")
+            errors.append(
+                f"Error 2049 (invalid key{', GroupId=' + group_id if has_gid else ', no GroupId'}) "
+                f"[{label}]"
+            )
             continue
 
         if status_code != 0:
             errors.append(f"API error {status_code}: {status_msg} [{label}]")
             continue
 
-        # ── Success ──────────────────────────────────────────────────────
+        # ── Success — decode hex audio ────────────────────────────────────
         audio_hex = data.get("data", {}).get("audio", "")
         if not audio_hex:
-            errors.append(f"Empty audio data [{label}]")
+            errors.append(f"Empty audio field [{label}]")
             continue
 
-        audio_bytes = bytes.fromhex(audio_hex)
+        try:
+            audio_bytes = bytes.fromhex(audio_hex)
+        except ValueError as e:
+            errors.append(f"Bad audio hex [{label}]: {e}")
+            continue
+
         if not output_path:
             output_path = os.path.join(os.getcwd(), "output_audio.mp3")
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -180,24 +196,29 @@ def generate_audio(
             f.write(audio_bytes)
         return output_path
 
-    # ── All endpoints failed ──────────────────────────────────────────────────
+    # ── All endpoints failed ──────────────────────────────────────────────
+    attempts = "\n".join(f"  • {e}" for e in errors)
+
     if got_auth_error:
+        gid_hint = (
+            f"\n  Group ID used: {group_id}" if group_id
+            else "\n  Group ID: NOT SET (this may be the cause!)"
+        )
         raise RuntimeError(
-            f"MiniMax: authentication failed (error 2049).\n\n"
-            f"Key used: {key_hint} (length {len(api_key)})\n\n"
+            f"MiniMax authentication failed (error 2049).\n\n"
+            f"Key used (last 6 chars): {key_hint}  |  length: {len(api_key)}"
+            f"{gid_hint}\n\n"
             f"What to check:\n"
-            f"  1. Go to platform.minimax.io → Account → API Keys\n"
-            f"  2. Create a NEW key and copy it completely\n"
-            f"  3. In Settings tab click 👁 to reveal the saved key and compare\n"
-            f"  4. Make sure you are using the key from platform.minimax.io\n"
-            f"     (international), NOT from minimax.chat (China platform)\n"
-            f"  5. If you have a Group ID, enter it in Settings too\n\n"
-            f"Attempts made:\n" + "\n".join(f"  • {e}" for e in errors)
+            f"  1. Log in to platform.minimax.io\n"
+            f"  2. Go to Account → API Keys — copy the key EXACTLY (no spaces)\n"
+            f"  3. Go to Account → Group Info — copy the Group ID number\n"
+            f"  4. In Settings tab: paste both the API Key AND the Group ID\n"
+            f"  5. Click the 👁 button to verify what is saved matches the site\n\n"
+            f"All attempts made:\n{attempts}"
         )
 
     raise RuntimeError(
-        "MiniMax TTS failed on all endpoints.\n\n"
-        + "\n".join(f"  • {e}" for e in errors)
+        f"MiniMax TTS failed on all endpoints.\n\n{attempts}"
     )
 
 
