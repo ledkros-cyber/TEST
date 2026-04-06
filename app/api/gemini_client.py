@@ -26,6 +26,8 @@ GEMINI_MODELS = {
 }
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
+MAX_GEMINI_KEYS = 10
+
 # Relax safety filters so creative/marketing content isn't blocked
 _SAFETY = {
     HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
@@ -40,6 +42,62 @@ SCRIPT_SYSTEM = (
     "Scripts must be 100% original, SEO-optimised, conversational, "
     "hook the viewer in the first 15 seconds, and end with a call to action."
 )
+
+
+def get_active_keys(cfg: dict) -> list[str]:
+    """Return all non-empty Gemini API keys from config (multi-key list + legacy single key)."""
+    keys = []
+    # Multi-key list takes priority
+    for k in cfg.get("gemini_api_keys", []):
+        k = (k or "").strip()
+        if k:
+            keys.append(k)
+    # Fall back to single legacy key if list is empty
+    if not keys:
+        single = (cfg.get("gemini_api_key") or "").strip()
+        if single:
+            keys.append(single)
+    return keys
+
+
+def _is_quota_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "quota" in msg or "429" in msg or "resource_exhausted" in msg
+
+
+def _call_with_rotation(fn, cfg: dict, *args, **kwargs):
+    """Call fn(api_key, *args, **kwargs) rotating keys on quota errors."""
+    keys = get_active_keys(cfg)
+    if not keys:
+        raise RuntimeError(
+            "Gemini API key is not set.\n"
+            "Go to Settings tab and enter your Google Gemini API key.\n"
+            "Get it free at: aistudio.google.com/app/apikey"
+        )
+    start = cfg.get("gemini_key_index", 0) % len(keys)
+    last_err = None
+    for i in range(len(keys)):
+        idx = (start + i) % len(keys)
+        key = keys[idx]
+        try:
+            result = fn(key, *args, **kwargs)
+            # Save successful key index
+            cfg["gemini_key_index"] = idx
+            try:
+                from app.config_manager import save_config
+                save_config(cfg)
+            except Exception:
+                pass
+            return result
+        except Exception as e:
+            if _is_quota_error(e) and len(keys) > 1:
+                last_err = e
+                continue
+            raise
+    raise RuntimeError(
+        f"All {len(keys)} Gemini API keys exhausted (quota exceeded).\n"
+        f"Last error: {last_err}"
+    )
 
 
 def _model(api_key: str, model_id: str):
@@ -63,8 +121,26 @@ def generate_script(
     target_chars: int = 3000,
     language: str = "ru",
     model_id: str = DEFAULT_GEMINI_MODEL,
+    cfg: dict | None = None,
 ) -> dict:
-    """Generate script via Gemini. Same return format as claude_client.generate_script."""
+    """Generate script via Gemini. Same return format as claude_client.generate_script.
+    If cfg is provided, key rotation across multiple accounts is used automatically."""
+    if cfg is not None:
+        return _call_with_rotation(
+            _generate_script_with_key, cfg,
+            source_videos, master_prompt, target_chars, language, model_id,
+        )
+    return _generate_script_with_key(api_key, source_videos, master_prompt, target_chars, language, model_id)
+
+
+def _generate_script_with_key(
+    api_key: str,
+    source_videos: list[dict],
+    master_prompt: str = "",
+    target_chars: int = 3000,
+    language: str = "ru",
+    model_id: str = DEFAULT_GEMINI_MODEL,
+) -> dict:
     m = _model(api_key, model_id)
 
     all_real_tags: list[str] = []
@@ -143,8 +219,25 @@ def analyze_thumbnails(
     new_title: str,
     new_description: str,
     model_id: str = DEFAULT_GEMINI_MODEL,
+    cfg: dict | None = None,
 ) -> list[str]:
-    """Analyse competitor thumbnails with Gemini Vision and return image-gen prompts."""
+    """Analyse competitor thumbnails with Gemini Vision and return image-gen prompts.
+    If cfg is provided, key rotation across multiple accounts is used automatically."""
+    if cfg is not None:
+        return _call_with_rotation(
+            _analyze_thumbnails_with_key, cfg,
+            thumbnail_data_list, new_title, new_description, model_id,
+        )
+    return _analyze_thumbnails_with_key(api_key, thumbnail_data_list, new_title, new_description, model_id)
+
+
+def _analyze_thumbnails_with_key(
+    api_key: str,
+    thumbnail_data_list: list[tuple[bytes, str]],
+    new_title: str,
+    new_description: str,
+    model_id: str = DEFAULT_GEMINI_MODEL,
+) -> list[str]:
     if not PIL_AVAILABLE:
         raise RuntimeError("Pillow is not installed. Run: pip install Pillow")
 

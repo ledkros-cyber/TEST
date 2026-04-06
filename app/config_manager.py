@@ -7,6 +7,8 @@ DEFAULTS = {
     "youtube_api_key": "",
     "anthropic_api_key": "",
     "gemini_api_key": "",
+    "gemini_api_keys": [],            # list of up to 10 Gemini API keys for rotation
+    "gemini_key_index": 0,            # current active key index
     "gemini_model": "gemini-2.0-flash",
     "ai_provider": "claude",          # "claude" or "gemini"
     "minimax_api_key": "",

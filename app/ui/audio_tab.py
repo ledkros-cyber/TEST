@@ -13,6 +13,12 @@ from app.api.minimax_client import (
 from app.processing.video_processor import get_audio_duration
 from app.ui.widgets import WheelDoubleSpinBox, WorkerThread, SectionHeader, StatusBar
 
+# Internal audio storage — inside the project's data/ folder
+_AUDIO_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data", "audio"
+)
+
 
 class AudioTab(QWidget):
     audio_ready = pyqtSignal(str)
@@ -115,11 +121,13 @@ class AudioTab(QWidget):
         vl.addLayout(r2)
         outer.addWidget(vg)
 
-        # Output path
-        og = QGroupBox("Save audio to")
+        # Optional custom save path
+        og = QGroupBox("Save audio to (optional — leave empty for auto)")
         ol = QHBoxLayout(og)
         self.output_path = QLineEdit()
-        self.output_path.setPlaceholderText("Path to save MP3 (auto-filled if empty)...")
+        self.output_path.setPlaceholderText(
+            "Auto-saved internally. Browse to choose a custom location..."
+        )
         ol.addWidget(self.output_path)
         browse_btn = QPushButton("Browse")
         browse_btn.setObjectName("secondary")
@@ -193,9 +201,9 @@ class AudioTab(QWidget):
 
         out_path = self.output_path.text().strip()
         if not out_path:
-            default_dir = cfg.get("output_folder", "") or os.path.expanduser("~")
-            out_path = os.path.join(default_dir, "voiceover.mp3")
-            self.output_path.setText(out_path)
+            # Auto-save to internal data/audio/ folder
+            os.makedirs(_AUDIO_DIR, exist_ok=True)
+            out_path = os.path.join(_AUDIO_DIR, "voiceover.mp3")
 
         self._set_busy(True)
         self._status.set_info("Generating voiceover via MiniMax...")
@@ -222,12 +230,15 @@ class AudioTab(QWidget):
         try:
             dur = get_audio_duration(path)
             self._audio_info.setText(
-                f"Audio saved: {os.path.basename(path)}  |  "
-                f"Duration: {dur:.1f}s ({dur/60:.1f} min)"
+                f"Audio ready: {os.path.basename(path)}  |  "
+                f"Duration: {dur:.1f}s ({dur/60:.1f} min)  |  "
+                f"Sent to Video tab automatically."
             )
         except Exception:
-            self._audio_info.setText(f"Audio saved: {path}")
-        self._status.set_ok("Voiceover ready!")
+            self._audio_info.setText(
+                f"Audio ready: {os.path.basename(path)}  |  Sent to Video tab automatically."
+            )
+        self._status.set_ok("Voiceover ready! Switched to Video tab.")
         self.audio_ready.emit(path)
 
     def _confirm(self):

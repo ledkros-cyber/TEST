@@ -18,16 +18,17 @@ def _api_generate(cfg, source_videos, master, target):
     """Route generate_script to Claude or Gemini based on config."""
     provider = cfg.get("ai_provider", "claude")
     if provider == "gemini":
-        api_key  = cfg.get("gemini_api_key", "").strip()
         model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        if not api_key:
+        # Use cfg for key rotation; get_active_keys will raise if no keys configured
+        keys = _gemini.get_active_keys(cfg)
+        if not keys:
             raise RuntimeError(
                 "Gemini API key is not set.\n"
                 "Go to Settings tab and enter your Google Gemini API key.\n"
                 "Get it free at: aistudio.google.com/app/apikey"
             )
-        return _gemini.generate_script(api_key, source_videos, master, target,
-                                       model_id=model_id)
+        return _gemini.generate_script("", source_videos, master, target,
+                                       model_id=model_id, cfg=cfg)
     else:
         api_key = cfg.get("anthropic_api_key", "").strip()
         if not api_key:
@@ -42,9 +43,9 @@ def _api_analyze_thumbnails(cfg, pairs, title, desc):
     """Route thumbnail analysis to Claude or Gemini."""
     provider = cfg.get("ai_provider", "claude")
     if provider == "gemini":
-        api_key  = cfg.get("gemini_api_key", "").strip()
         model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        return _gemini.analyze_thumbnails(api_key, pairs, title, desc, model_id=model_id)
+        return _gemini.analyze_thumbnails("", pairs, title, desc,
+                                          model_id=model_id, cfg=cfg)
     else:
         api_key = cfg.get("anthropic_api_key", "").strip()
         return _claude.analyze_thumbnails(api_key, pairs, title, desc)
