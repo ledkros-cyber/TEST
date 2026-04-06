@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -233,37 +232,47 @@ def get_video_files(folder: str) -> list[str]:
 # Clip cutting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _cut_clip_gpu(input_path: str, start: float, duration: float, output_path: str):
+def _cut_clip_gpu(input_path: str, start: float, duration: float,
+                  output_path: str, fps: int = 30):
+    # Force constant frame rate so all clips have identical FPS for concat
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-ss", str(start),
         "-i", input_path,
         "-t", str(duration),
+        "-vf", f"fps={fps}",
         "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "constqp", "-qp", "28",
-        "-an", output_path,
+        "-an",
+        "-video_track_timescale", "90000",
+        output_path,
     ], f"cut_clip_gpu {os.path.basename(input_path)}")
 
 
-def _cut_clip_cpu(input_path: str, start: float, duration: float, output_path: str):
+def _cut_clip_cpu(input_path: str, start: float, duration: float,
+                  output_path: str, fps: int = 30):
+    # Force constant frame rate so all clips have identical FPS for concat
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-ss", str(start),
         "-i", input_path,
         "-t", str(duration),
+        "-vf", f"fps={fps}",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-        "-an", output_path,
+        "-an",
+        "-video_track_timescale", "90000",
+        output_path,
     ], f"cut_clip_cpu {os.path.basename(input_path)}")
 
 
 def _cut_clip(use_gpu: bool, input_path: str, start: float,
-              duration: float, output_path: str):
+              duration: float, output_path: str, fps: int = 30):
     if use_gpu and gpu_available():
         try:
-            _cut_clip_gpu(input_path, start, duration, output_path)
+            _cut_clip_gpu(input_path, start, duration, output_path, fps=fps)
             return
         except Exception:
             pass
-    _cut_clip_cpu(input_path, start, duration, output_path)
+    _cut_clip_cpu(input_path, start, duration, output_path, fps=fps)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,11 +287,15 @@ def _build_concat_list(clip_paths: list[str], list_path: str):
 
 
 def _concat_clips(list_path: str, output_path: str):
+    # -fflags +genpts regenerates presentation timestamps — prevents frozen frames
+    # when clips have slightly different timescales after cutting
     _run([
         FFMPEG, "-y", "-hide_banner",
+        "-fflags", "+genpts",
         "-f", "concat", "-safe", "0",
         "-i", list_path,
         "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         output_path,
     ], "concat_clips")
 
@@ -293,14 +306,12 @@ def _concat_clips(list_path: str, output_path: str):
 
 def _srt_filter(srt_path: str) -> str:
     """Build a safe subtitles= filter string for Windows paths."""
-    # On Windows, FFmpeg filter paths: backslash→slash, colon→\:
     safe = srt_path.replace("\\", "/")
-    # Escape the drive-letter colon: C:/path → C\:/path
     safe = re.sub(r"^([A-Za-z]):/", r"\1\\:/", safe)
     return (
         f"subtitles='{safe}':force_style="
-        f"'FontSize=28,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
-        f"Outline=2,Alignment=2'"
+        f"'FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
+        f"Outline=2,Shadow=1,Alignment=2,MarginV=30'"
     )
 
 
@@ -426,12 +437,67 @@ def _final_render_cpu_no_subs(
 # Subtitle generator
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _clean_script_for_subs(script: str) -> str:
+    """Remove stage directions and narrator labels from script for subtitles."""
+    # Remove (Visual: ...) and similar parenthetical stage directions
+    text = re.sub(r'\(.*?\)', '', script, flags=re.DOTALL)
+    # Remove "Narrator:" / "Голос за кадром:" prefixes
+    text = re.sub(r'(?i)^(narrator|голос за кадром|speaker|voice|диктор)\s*:\s*', '', text, flags=re.MULTILINE)
+    # Collapse extra blank lines and spaces
+    text = re.sub(r'\n{2,}', '\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
+
+
+def _split_into_chunks(text: str, max_chars: int = 42) -> list[str]:
+    """Split text into lines of max_chars, max 2 lines per chunk."""
+    words = text.split()
+    chunks: list[str] = []
+    line1, line2 = "", ""
+    for word in words:
+        # Try to add to line1
+        test = (line1 + " " + word).strip() if line1 else word
+        if len(test) <= max_chars:
+            line1 = test
+        else:
+            # line1 is full — try line2
+            test2 = (line2 + " " + word).strip() if line2 else word
+            if len(test2) <= max_chars:
+                line2 = test2
+            else:
+                # Both lines full — flush and start new chunk
+                chunk = line1
+                if line2:
+                    chunk += "\n" + line2
+                chunks.append(chunk)
+                line1 = word
+                line2 = ""
+    # Flush remaining
+    if line1 or line2:
+        chunk = line1
+        if line2:
+            chunk += "\n" + line2
+        chunks.append(chunk)
+    return [c for c in chunks if c.strip()]
+
+
 def _make_srt(script: str, audio_duration: float, output_path: str):
-    sentences = re.split(r'(?<=[.!?])\s+', script.strip())
+    clean = _clean_script_for_subs(script)
+    # Split into short phrases by punctuation first
+    sentences = re.split(r'(?<=[.!?,;])\s+', clean)
+    sentences = [s.strip() for s in sentences if s.strip()]
     if not sentences:
         return
 
-    total_chars = sum(len(s) for s in sentences) or 1
+    # Break long sentences into 2-line chunks (max 42 chars/line)
+    chunks: list[str] = []
+    for sent in sentences:
+        chunks.extend(_split_into_chunks(sent, max_chars=42))
+
+    if not chunks:
+        return
+
+    total_chars = sum(len(c.replace("\n", " ")) for c in chunks) or 1
 
     def fmt_time(seconds: float) -> str:
         h  = int(seconds // 3600)
@@ -442,13 +508,11 @@ def _make_srt(script: str, audio_duration: float, output_path: str):
 
     with open(output_path, "w", encoding="utf-8") as f:
         current = 0.0
-        for idx, sentence in enumerate(sentences, 1):
-            if not sentence.strip():
-                continue
-            duration = (len(sentence) / total_chars) * audio_duration
-            end      = current + max(duration, 1.0)
-            wrapped  = "\n".join(textwrap.wrap(sentence.strip(), 55))
-            f.write(f"{idx}\n{fmt_time(current)} --> {fmt_time(end)}\n{wrapped}\n\n")
+        for idx, chunk in enumerate(chunks, 1):
+            char_count = len(chunk.replace("\n", " "))
+            duration   = (char_count / total_chars) * audio_duration
+            end        = current + max(duration, 0.8)
+            f.write(f"{idx}\n{fmt_time(current)} --> {fmt_time(end)}\n{chunk}\n\n")
             current = end
 
 
@@ -501,9 +565,11 @@ def process_video(config: VideoConfig) -> str:
                       for i in range(len(clip_infos))]
 
         done_count = 0
+        # Clip FPS: match final output FPS so concat -c copy works without freezing
+        clip_fps = min(config.fps, 60)
         with ThreadPoolExecutor(max_workers=config.parallel_workers) as ex:
             futures = {
-                ex.submit(_cut_clip, use_gpu, src, start, dur, clip_paths[i]): i
+                ex.submit(_cut_clip, use_gpu, src, start, dur, clip_paths[i], clip_fps): i
                 for i, (src, start, dur) in enumerate(clip_infos)
             }
             for fut in as_completed(futures):
