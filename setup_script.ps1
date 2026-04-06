@@ -10,6 +10,43 @@ $BinDir  = Join-Path $AppDir "bin"
 $LogFile = Join-Path $AppDir "setup_log.txt"
 $ReqFile = Join-Path $AppDir "requirements.txt"
 
+# ==============================================================
+# CRITICAL CHECK: path must contain only ASCII characters
+# Python/pip FAIL on Windows when path has Cyrillic, Chinese, etc.
+# ==============================================================
+$nonAscii = $AppDir -match '[^\x00-\x7F]'
+if ($nonAscii) {
+    Write-Host ""
+    Write-Host "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+    Write-Host "  OSHIBKA: V puti k programme est ne-ASCII simvoly" -ForegroundColor Red
+    Write-Host "  (kirillica, proбely ili spetssimvoly)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Tekushchiy put:" -ForegroundColor Yellow
+    Write-Host "  $AppDir" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  RESHENIE: Perenesites papku programmy v:" -ForegroundColor Green
+    Write-Host "  C:\VideoGenerator\" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Shagi:" -ForegroundColor White
+    Write-Host "  1. Zakreyte eto okno" -ForegroundColor White
+    Write-Host "  2. Perenesites papku s programmoy v  C:\VideoGenerator\" -ForegroundColor White
+    Write-Host "  3. Zapustite SETUP.bat snova iz novogo mesta" -ForegroundColor White
+    Write-Host "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Nazhemite Enter chtoby zakryt..." -ForegroundColor Gray
+    Read-Host
+    exit 1
+}
+
+# Also warn about spaces in path (less critical but can cause issues)
+if ($AppDir -match ' ') {
+    Write-Host ""
+    Write-Host "  WARNING: Path contains spaces: $AppDir" -ForegroundColor Yellow
+    Write-Host "  Recommended: move to C:\VideoGenerator\ (no spaces)" -ForegroundColor Yellow
+    Write-Host "  Continuing anyway..." -ForegroundColor Gray
+    Write-Host ""
+}
+
 function Log($msg) {
     $ts = Get-Date -Format "HH:mm:ss"
     $line = "[$ts] $msg"
@@ -111,7 +148,10 @@ if (Test-Path $venvPy) {
 # ==============================================================
 LogSection "Step 3/6 - Upgrade pip"
 
+# Use Continue so pip's stderr logging noise doesn't kill the script
+$ErrorActionPreference = "Continue"
 $out = & $venvPy -m pip install --upgrade pip 2>&1
+$ErrorActionPreference = "Stop"
 Log ($out | Out-String)
 Log "pip upgraded."
 
