@@ -1,30 +1,67 @@
-"""Google Gemini API client — uses REST API v1 directly (no SDK required).
-Direct HTTP calls bypass the SDK's v1beta issue entirely.
+"""Google Gemini API client — uses REST API v1beta directly (no SDK required).
+Dynamic model discovery via ListModels endpoint — no hardcoded model IDs.
 API docs: https://ai.google.dev/api/generate-content
 """
 import base64
-import io
 import re
 import requests
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model registry  (exactly as specified, cascade most → least capable)
+# Preference order for sorting discovered models (most capable first).
+# Models not in this list get appended at the end in discovery order.
 # ─────────────────────────────────────────────────────────────────────────────
 
-GEMINI_MODEL_CASCADE = [
-    "gemini-2.5-pro",    # Flagship — best reasoning & creative writing
-    "gemini-1.5-pro",    # Previous-gen — large context window
-    "gemini-1.5-flash",  # Fast & cost-effective — drafts and summaries
+_MODEL_PREFERENCE = [
+    # Gemini 3.x — newest generation
+    "gemini-3.1-pro",
+    "gemini-3.1-flash",
+    "gemini-3-pro",
+    "gemini-3-pro-preview",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-flash-preview",
+    "gemini-3-flash",
+    # Gemini 2.x
+    "gemini-2.5-pro",
+    "gemini-2.5-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-preview",
+    "gemini-2.0-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    # Gemini 1.5
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
 ]
 
+# Fallback cascade used only when ListModels API call fails entirely
+_FALLBACK_CASCADE = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+]
+
+# Display names for known models (shown in UI)
 GEMINI_MODELS = {
-    "gemini-2.5-pro":   "Gemini 2.5 Pro — Flagship (best quality)",
-    "gemini-1.5-pro":   "Gemini 1.5 Pro — Large context window",
-    "gemini-1.5-flash": "Gemini 1.5 Flash — Fast & cost-effective",
+    "gemini-3.1-pro":               "Gemini 3.1 Pro — Latest flagship",
+    "gemini-3.1-flash":             "Gemini 3.1 Flash — Fast & capable",
+    "gemini-3-pro-preview":         "Gemini 3 Pro Preview",
+    "gemini-3-flash-preview":       "Gemini 3 Flash Preview",
+    "gemini-3-flash":               "Gemini 3 Flash",
+    "gemini-2.5-pro":               "Gemini 2.5 Pro — Large context window",
+    "gemini-2.5-flash":             "Gemini 2.5 Flash — Fast & cost-effective",
+    "gemini-2.5-flash-preview":     "Gemini 2.5 Flash Preview",
+    "gemini-2.0-flash":             "Gemini 2.0 Flash",
+    "gemini-1.5-pro":               "Gemini 1.5 Pro",
+    "gemini-1.5-flash":             "Gemini 1.5 Flash",
 }
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"   # safe starting point
 
 MAX_GEMINI_KEYS = 10
+
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 SCRIPT_SYSTEM = (
     "You are a professional YouTube scriptwriter. "
@@ -33,16 +70,93 @@ SCRIPT_SYSTEM = (
     "hook the viewer in the first 15 seconds, and end with a call to action."
 )
 
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-
 try:
     from PIL import Image as PILImage
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
 
-# So the rest of the app can check availability (always True — uses requests)
 GEMINI_AVAILABLE = True
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session-level model discovery cache  {api_key_prefix → [model_id, ...]}
+# ─────────────────────────────────────────────────────────────────────────────
+
+_discovered_models_cache: dict[str, list[str]] = {}
+
+
+def _cache_key(api_key: str) -> str:
+    """Use first 12 chars of key as cache key (avoids storing full key)."""
+    return (api_key or "").strip()[:12]
+
+
+def _discover_models(api_key: str) -> list[str]:
+    """
+    Query ListModels endpoint to find all models the key can use for generateContent.
+    Returns models sorted by _MODEL_PREFERENCE (most capable first).
+    Falls back to _FALLBACK_CASCADE on any error.
+    """
+    ck = _cache_key(api_key)
+    if ck in _discovered_models_cache:
+        return _discovered_models_cache[ck]
+
+    key = api_key.strip()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+    try:
+        resp = requests.get(url, timeout=15)
+    except Exception:
+        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
+        return list(_FALLBACK_CASCADE)
+
+    if resp.status_code != 200:
+        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
+        return list(_FALLBACK_CASCADE)
+
+    try:
+        data = resp.json()
+    except Exception:
+        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
+        return list(_FALLBACK_CASCADE)
+
+    models_raw = data.get("models", [])
+    available: list[str] = []
+    for m in models_raw:
+        name = m.get("name", "")           # e.g. "models/gemini-2.5-flash"
+        methods = m.get("supportedGenerationMethods", [])
+        if "generateContent" not in methods:
+            continue
+        # Strip "models/" prefix
+        model_id = name.removeprefix("models/")
+        if not model_id:
+            continue
+        # Skip experimental/embed/vision-only models we don't want
+        skip_keywords = ("embedding", "aqa", "retrieval", "learnlm", "vision-specialist")
+        if any(kw in model_id.lower() for kw in skip_keywords):
+            continue
+        available.append(model_id)
+
+    if not available:
+        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
+        return list(_FALLBACK_CASCADE)
+
+    # Sort by preference: preferred models first (by position in _MODEL_PREFERENCE)
+    pref_index = {m: i for i, m in enumerate(_MODEL_PREFERENCE)}
+    NOT_LISTED = len(_MODEL_PREFERENCE)
+
+    def sort_key(m: str) -> tuple:
+        # Exact match first, then check prefix (handles -preview variants not in list)
+        idx = pref_index.get(m, NOT_LISTED)
+        return (idx, m)
+
+    available.sort(key=sort_key)
+
+    _discovered_models_cache[ck] = available
+    return available
+
+
+def clear_model_cache():
+    """Clear cached model lists (called after changing API keys)."""
+    _discovered_models_cache.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,16 +204,30 @@ def _call_with_cascade(fn, cfg: dict, *args,
             "Free key: aistudio.google.com/app/apikey"
         )
 
-    start_idx = (GEMINI_MODEL_CASCADE.index(model_id)
-                 if model_id in GEMINI_MODEL_CASCADE else 0)
-    models_to_try = GEMINI_MODEL_CASCADE[start_idx:]
     start_key = cfg.get("gemini_key_index", 0) % len(keys)
     last_err = None
 
-    for model in models_to_try:
-        for ki in range(len(keys)):
-            key_idx = (start_key + ki) % len(keys)
-            key = keys[key_idx]
+    # Try each key; for each key discover its available models and cascade through them
+    for ki in range(len(keys)):
+        key_idx = (start_key + ki) % len(keys)
+        key = keys[key_idx]
+
+        # Discover models available for this specific key
+        models_for_key = _discover_models(key)
+
+        # If caller specified a preferred model and it's in the list, start from it;
+        # otherwise start from the beginning (most capable)
+        if model_id in models_for_key:
+            start_model_idx = models_for_key.index(model_id)
+        else:
+            start_model_idx = 0
+
+        models_to_try = models_for_key[start_model_idx:]
+        if not models_to_try:
+            models_to_try = models_for_key  # safety
+
+        key_succeeded = False
+        for model in models_to_try:
             try:
                 result = fn(key, *args, model_id=model, **kwargs)
                 cfg["gemini_key_index"]       = key_idx
@@ -115,16 +243,24 @@ def _call_with_cascade(fn, cfg: dict, *args,
             except Exception as e:
                 last_err = e
                 if _is_model_error(e):
-                    break       # model unavailable — try next model
+                    # This model doesn't work — remove from cache and try next
+                    ck = _cache_key(key)
+                    cached = _discovered_models_cache.get(ck, [])
+                    if model in cached:
+                        cached.remove(model)
+                    continue
                 elif _is_quota_error(e):
-                    continue    # quota — try next key
+                    # Quota exhausted for this key — move to next key
+                    key_succeeded = False
+                    break
                 else:
-                    raise       # auth / network error — propagate immediately
+                    raise   # auth/network error — propagate immediately
 
-    tried = ", ".join(models_to_try)
+    tried_models = list({m for k in keys for m in _discover_models(k)})
+    tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
     raise RuntimeError(
         f"All Gemini models/keys exhausted.\n"
-        f"Models tried: {tried}\n"
+        f"Models tried: {tried_str}\n"
         f"Keys tried: {len(keys)}\n"
         f"Last error: {last_err}\n\n"
         f"Check your key at aistudio.google.com/app/apikey"
@@ -132,7 +268,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core REST call  (v1 API — no SDK, no v1beta)
+# Core REST call
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _post_gemini(url: str, payload: dict) -> requests.Response:
@@ -171,7 +307,6 @@ def _parse_response(resp: requests.Response, model_id: str) -> str:
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as e:
-        # Check for safety block
         block_reason = data.get("promptFeedback", {}).get("blockReason", "")
         if block_reason:
             raise RuntimeError(f"Gemini blocked the request: {block_reason}")
@@ -198,7 +333,6 @@ def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
             sys_text = "\n".join(p.get("text", "") for p in parts).strip()
 
         if sys_text and "contents" in payload_v1:
-            # Prepend system prompt to first user message
             first = payload_v1["contents"][0]
             old_text = first["parts"][0].get("text", "")
             first["parts"][0]["text"] = f"{sys_text}\n\n{old_text}"
@@ -207,6 +341,22 @@ def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
         resp = _post_gemini(url_v1, payload_v1)
 
     return _parse_response(resp, model_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API — list available models for a key
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_available_models(cfg: dict) -> list[str]:
+    """
+    Return list of model IDs available for the first active key.
+    Used by Settings UI to populate the model selector.
+    Returns fallback list if no key configured or discovery fails.
+    """
+    keys = get_active_keys(cfg)
+    if not keys:
+        return list(_FALLBACK_CASCADE)
+    return _discover_models(keys[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

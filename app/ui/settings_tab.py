@@ -7,7 +7,10 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config_manager import load_config, save_config
-from app.api.gemini_client import GEMINI_MODELS, DEFAULT_GEMINI_MODEL, MAX_GEMINI_KEYS
+from app.api.gemini_client import (
+    GEMINI_MODELS, DEFAULT_GEMINI_MODEL, MAX_GEMINI_KEYS,
+    get_available_models, clear_model_cache,
+)
 from app.ui.widgets import ApiKeyField, SectionHeader, StatusBar
 
 
@@ -117,19 +120,21 @@ class SettingsTab(QWidget):
         for key_val in saved_keys:
             self._add_gemini_key_field(value=key_val)
 
-        # Gemini model selector
+        # Gemini model selector (populated dynamically via ListModels)
         gemini_model_row = QWidget()
         gmr_layout = QHBoxLayout(gemini_model_row)
         gmr_layout.setContentsMargins(0, 0, 0, 0)
         self.gemini_model_combo = QComboBox()
-        for mid, mlabel in GEMINI_MODELS.items():
-            self.gemini_model_combo.addItem(mlabel, mid)
+        self.gemini_model_combo.setMinimumWidth(280)
         cur_gm = cfg.get("gemini_model", DEFAULT_GEMINI_MODEL)
-        for i in range(self.gemini_model_combo.count()):
-            if self.gemini_model_combo.itemData(i) == cur_gm:
-                self.gemini_model_combo.setCurrentIndex(i)
-                break
+        self._populate_model_combo(cfg, cur_gm)
         gmr_layout.addWidget(self.gemini_model_combo)
+        refresh_btn = QPushButton("⟳")
+        refresh_btn.setObjectName("secondary")
+        refresh_btn.setFixedWidth(32)
+        refresh_btn.setToolTip("Refresh available models from Google API")
+        refresh_btn.clicked.connect(self._refresh_models)
+        gmr_layout.addWidget(refresh_btn)
         gmr_layout.addStretch()
         api_form.addRow("Gemini Model:", gemini_model_row)
 
@@ -174,6 +179,36 @@ class SettingsTab(QWidget):
 
         # Highlight active provider
         self._on_provider_changed()
+
+    # ── Gemini model helpers ──────────────────────────────────────────────
+    def _populate_model_combo(self, cfg: dict, selected_id: str = ""):
+        """Fill model combo from API-discovered model list."""
+        self.gemini_model_combo.clear()
+        available = get_available_models(cfg)
+        if not available:
+            available = [DEFAULT_GEMINI_MODEL]
+        for mid in available:
+            label = GEMINI_MODELS.get(mid, mid)  # use known label or raw ID
+            self.gemini_model_combo.addItem(label, mid)
+        # Restore selection
+        restored = False
+        if selected_id:
+            for i in range(self.gemini_model_combo.count()):
+                if self.gemini_model_combo.itemData(i) == selected_id:
+                    self.gemini_model_combo.setCurrentIndex(i)
+                    restored = True
+                    break
+        if not restored:
+            self.gemini_model_combo.setCurrentIndex(0)
+
+    def _refresh_models(self):
+        """Clear cache and re-query available models from the API."""
+        clear_model_cache()
+        cfg = load_config()
+        cur = self.gemini_model_combo.currentData() or ""
+        self._populate_model_combo(cfg, cur)
+        count = self.gemini_model_combo.count()
+        self._status.set_ok(f"Models refreshed: {count} available.")
 
     # ── Gemini multi-key helpers ──────────────────────────────────────────
     def _add_gemini_key_field(self, checked=False, value: str = ""):
@@ -254,6 +289,14 @@ class SettingsTab(QWidget):
         cfg["gemini_key_index"] = 0
 
         save_config(cfg)
+
+        # Clear cached model list so next request re-discovers with the new key
+        clear_model_cache()
+
+        # Refresh model combo to reflect what the new key can actually use
+        cur_model = self.gemini_model_combo.currentData() or cfg.get("gemini_model", DEFAULT_GEMINI_MODEL)
+        self._populate_model_combo(cfg, cur_model)
+
         self._status.set_ok(f"Settings saved! ({len(keys)} Gemini key(s) stored)")
 
     def get_config(self) -> dict:
