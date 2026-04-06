@@ -135,7 +135,7 @@ class VideoConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run(cmd: list[str], desc: str = "") -> str:
-    """Run a command, raise RuntimeError with the actual FFmpeg error (not the banner)."""
+    """Run a command; on failure show the real FFmpeg error, not the banner."""
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -144,35 +144,21 @@ def _run(cmd: list[str], desc: str = "") -> str:
         **_POPEN_FLAGS,
     )
     if result.returncode != 0:
-        # FFmpeg banner can be thousands of chars. Find the real error:
-        # It usually starts with a line like "filename: No such file" or
-        # "Error" after all the encoder/muxer listing lines.
         stderr = result.stderr
-        # Strip the banner (lines before first blank line after "ffmpeg version")
-        # by finding the last occurrence of meaningful error text
-        lines = stderr.splitlines()
-        # Collect lines that look like errors (skip capability listings)
-        error_lines = []
-        in_error = False
-        for line in lines:
-            lo = line.lower()
-            if (
-                "error" in lo or "invalid" in lo or "failed" in lo
-                or "no such" in lo or "unable" in lo or "could not" in lo
-                or "not found" in lo or "permission" in lo
-                or line.startswith("  ")  # indented error context
-            ) and "--enable" not in line and "--disable" not in line:
-                in_error = True
-            if in_error:
-                error_lines.append(line)
+        lines  = stderr.splitlines()
 
-        # Fallback: last 40 lines
-        if not error_lines:
-            error_lines = lines[-40:]
+        # Skip the FFmpeg banner: everything before the first blank line
+        # that follows "ffmpeg version" or "ffprobe version"
+        start = 0
+        for i, ln in enumerate(lines):
+            if ln.strip() == "" and i > 0:
+                start = i + 1
+                break
 
-        raise RuntimeError(
-            f"FFmpeg error ({desc}):\n" + "\n".join(error_lines[-60:])
-        )
+        # From that point take the last 60 lines — actual encode messages
+        relevant = lines[start:][-60:]
+        msg = "\n".join(relevant) if relevant else stderr[-2000:]
+        raise RuntimeError(f"FFmpeg error ({desc}):\n{msg}")
     return result.stdout
 
 
@@ -347,25 +333,46 @@ def _final_render_cpu(
         vf_parts.append(_srt_filter(srt_path))
     vf = ",".join(vf_parts)
 
-    filter_complex = (
-        f"[0:a]volume={bg_volume:.4f}[bga];"
-        f"[1:a]volume={voice_volume:.4f}[voa];"
-        f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
-    )
-
     cpu_cores = os.cpu_count() or 4
+
+    if _has_audio_stream(raw_video):
+        filter_complex = (
+            f"[0:a]volume={bg_volume:.4f}[bga];"
+            f"[1:a]volume={voice_volume:.4f}[voa];"
+            f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+        )
+        audio_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[aout]"]
+    else:
+        audio_args = ["-map", "0:v", "-map", "1:a",
+                      "-af", f"volume={voice_volume:.4f}"]
+
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
-        "-filter_complex", filter_complex,
+        *audio_args,
         "-vf", vf,
-        "-map", "0:v", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
     ], "final_render_cpu")
+
+
+def _has_audio_stream(path: str) -> bool:
+    """Return True if the file contains at least one audio stream."""
+    try:
+        result = subprocess.run(
+            [FFPROBE, "-v", "error",
+             "-select_streams", "a",
+             "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=10, **_POPEN_FLAGS,
+        )
+        return "audio" in result.stdout
+    except Exception:
+        return False
 
 
 def _final_render_cpu_no_subs(
@@ -383,19 +390,26 @@ def _final_render_cpu_no_subs(
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
     vf = ",".join(vf_parts)
 
-    filter_complex = (
-        f"[0:a]volume={bg_volume:.4f}[bga];"
-        f"[1:a]volume={voice_volume:.4f}[voa];"
-        f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
-    )
-
     cpu_cores = os.cpu_count() or 4
+
+    if _has_audio_stream(raw_video):
+        # Mix background audio from video + voiceover
+        filter_complex = (
+            f"[0:a]volume={bg_volume:.4f}[bga];"
+            f"[1:a]volume={voice_volume:.4f}[voa];"
+            f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+        )
+        audio_args = ["-filter_complex", filter_complex, "-map", "0:v", "-map", "[aout]"]
+    else:
+        # No audio in source clips — use only voiceover
+        audio_args = ["-map", "0:v", "-map", "1:a",
+                      "-af", f"volume={voice_volume:.4f}"]
+
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
-        "-filter_complex", filter_complex,
+        *audio_args,
         "-vf", vf,
-        "-map", "0:v", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
