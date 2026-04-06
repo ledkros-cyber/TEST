@@ -1,46 +1,26 @@
-"""Google Gemini API client — uses new google-genai SDK (v1 API, not v1beta).
-Install: pip install google-genai
-Docs: https://ai.google.dev/gemini-api/docs
+"""Google Gemini API client — uses REST API v1 directly (no SDK required).
+Direct HTTP calls bypass the SDK's v1beta issue entirely.
+API docs: https://ai.google.dev/api/generate-content
 """
+import base64
 import io
 import re
-
-# ── New SDK (google-genai, v1 API) ────────────────────────────────────────────
-try:
-    from google import genai
-    from google.genai import types as genai_types
-    GEMINI_AVAILABLE = True
-    GEMINI_SDK = "new"
-except ImportError:
-    GEMINI_AVAILABLE = False
-    GEMINI_SDK = "none"
-
-# ── Pillow for Vision ─────────────────────────────────────────────────────────
-try:
-    from PIL import Image as PILImage
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
-
+import requests
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model registry
+# Model registry  (exactly as specified, cascade most → least capable)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Cascade order: most capable → least capable
-# If a model returns 404/unavailable it is skipped automatically.
 GEMINI_MODEL_CASCADE = [
-    "gemini-2.5-pro",       # Gemini 2.5 Pro  (newest flagship)
-    "gemini-2.0-flash",     # Gemini 2.0 Flash (fast, widely available)
-    "gemini-1.5-pro",       # Gemini 1.5 Pro   (large context)
-    "gemini-1.5-flash",     # Gemini 1.5 Flash  (fast, cost-effective)
+    "gemini-2.5-pro",    # Flagship — best reasoning & creative writing
+    "gemini-1.5-pro",    # Previous-gen — large context window
+    "gemini-1.5-flash",  # Fast & cost-effective — drafts and summaries
 ]
 
 GEMINI_MODELS = {
-    "gemini-2.5-pro":   "Gemini 2.5 Pro (flagship, best quality)",
-    "gemini-2.0-flash": "Gemini 2.0 Flash (recommended, fast)",
-    "gemini-1.5-pro":   "Gemini 1.5 Pro (large context window)",
-    "gemini-1.5-flash": "Gemini 1.5 Flash (fast, cost-effective)",
+    "gemini-2.5-pro":   "Gemini 2.5 Pro — Flagship (best quality)",
+    "gemini-1.5-pro":   "Gemini 1.5 Pro — Large context window",
+    "gemini-1.5-flash": "Gemini 1.5 Flash — Fast & cost-effective",
 }
 DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
 
@@ -52,6 +32,17 @@ SCRIPT_SYSTEM = (
     "Scripts must be 100% original, SEO-optimised, conversational, "
     "hook the viewer in the first 15 seconds, and end with a call to action."
 )
+
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1/models"
+
+try:
+    from PIL import Image as PILImage
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# So the rest of the app can check availability (always True — uses requests)
+GEMINI_AVAILABLE = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,16 +64,14 @@ def get_active_keys(cfg: dict) -> list[str]:
 
 def _is_quota_error(e: Exception) -> bool:
     msg = str(e).lower()
-    return "quota" in msg or "429" in msg or "resource_exhausted" in msg
+    return "quota" in msg or "429" in msg or "resource_exhausted" in msg or "rate" in msg
 
 
 def _is_model_error(e: Exception) -> bool:
     msg = str(e).lower()
     return (
-        "404" in msg
-        or "not found" in msg
-        or "not supported" in msg
-        or "deprecated" in msg
+        "404" in msg or "not_found" in msg or "not found" in msg
+        or "not supported" in msg or "deprecated" in msg
         or ("invalid" in msg and "model" in msg)
     )
 
@@ -93,24 +82,16 @@ def _is_model_error(e: Exception) -> bool:
 
 def _call_with_cascade(fn, cfg: dict, *args,
                        model_id: str = DEFAULT_GEMINI_MODEL, **kwargs):
-    """
-    Try models from most→least capable, rotating keys on quota errors.
-    - Quota error  → rotate to next key (same model)
-    - Model 404    → skip to next model (try all keys first)
-    - Other error  → raise immediately
-    """
     keys = get_active_keys(cfg)
     if not keys:
         raise RuntimeError(
             "Gemini API key is not set.\n"
-            "Go to Settings tab → enter your Gemini key.\n"
+            "Go to Settings tab → Gemini API Keys → add your key.\n"
             "Free key: aistudio.google.com/app/apikey"
         )
 
-    start_idx = (
-        GEMINI_MODEL_CASCADE.index(model_id)
-        if model_id in GEMINI_MODEL_CASCADE else 0
-    )
+    start_idx = (GEMINI_MODEL_CASCADE.index(model_id)
+                 if model_id in GEMINI_MODEL_CASCADE else 0)
     models_to_try = GEMINI_MODEL_CASCADE[start_idx:]
     start_key = cfg.get("gemini_key_index", 0) % len(keys)
     last_err = None
@@ -134,11 +115,11 @@ def _call_with_cascade(fn, cfg: dict, *args,
             except Exception as e:
                 last_err = e
                 if _is_model_error(e):
-                    break        # model unavailable — skip all keys, try next model
+                    break       # model unavailable — try next model
                 elif _is_quota_error(e):
-                    continue     # quota — try next key
+                    continue    # quota — try next key
                 else:
-                    raise        # auth error, network, etc. — propagate
+                    raise       # auth / network error — propagate immediately
 
     tried = ", ".join(models_to_try)
     raise RuntimeError(
@@ -146,22 +127,60 @@ def _call_with_cascade(fn, cfg: dict, *args,
         f"Models tried: {tried}\n"
         f"Keys tried: {len(keys)}\n"
         f"Last error: {last_err}\n\n"
-        f"Tip: verify your key at aistudio.google.com/app/apikey"
+        f"Check your key at aistudio.google.com/app/apikey"
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal — build a client (new SDK uses v1 REST API, not v1beta)
+# Core REST call  (v1 API — no SDK, no v1beta)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _client(api_key: str):
-    if not GEMINI_AVAILABLE:
-        raise RuntimeError(
-            "google-genai is not installed.\n"
-            "Run: pip install google-genai\n"
-            "Or re-run SETUP.bat to update dependencies."
+def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
+    """
+    POST https://generativelanguage.googleapis.com/v1/models/{model}:generateContent
+    Returns the text of the first candidate.
+    Raises RuntimeError with a human-readable message on any error.
+    """
+    url = f"{_GEMINI_BASE}/{model_id}:generateContent?key={api_key.strip()}"
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=120,
         )
-    return genai.Client(api_key=api_key.strip())
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"Network error reaching Gemini API: {e}")
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Gemini API request timed out (>120s).")
+
+    if resp.status_code == 400:
+        err = resp.json().get("error", {})
+        raise RuntimeError(f"Gemini 400 Bad Request: {err.get('message', resp.text[:300])}")
+
+    if resp.status_code == 401 or resp.status_code == 403:
+        raise RuntimeError(
+            f"Gemini API key rejected (HTTP {resp.status_code}).\n"
+            "Verify your key at aistudio.google.com/app/apikey"
+        )
+
+    if resp.status_code == 404:
+        err = resp.json().get("error", {})
+        raise RuntimeError(f"404 model not found: {err.get('message', model_id)}")
+
+    if resp.status_code == 429:
+        raise RuntimeError(f"Gemini quota exceeded (429) for model {model_id}.")
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Gemini HTTP {resp.status_code}: {resp.text[:300]}"
+        )
+
+    data = resp.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Unexpected Gemini response structure: {e}\n{str(data)[:400]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,8 +216,6 @@ def _generate_script_with_key(
     language: str = "ru",
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> dict:
-    client = _client(api_key)
-
     all_real_tags: list[str] = []
     sources_text = ""
     thumbnail_urls: list[str] = []
@@ -225,7 +242,7 @@ def _generate_script_with_key(
             unique_tags.append(t.strip())
     unique_tags = unique_tags[:40]
 
-    prompt = f"""{master_prompt}
+    user_prompt = f"""{master_prompt}
 
 COMPETITOR SOURCES TO ANALYSE:
 {sources_text}
@@ -262,17 +279,20 @@ Reply STRICTLY in this format:
 [tags]
 """
 
-    response = client.models.generate_content(
-        model=model_id,
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=SCRIPT_SYSTEM,
-            temperature=0.85,
-            max_output_tokens=8192,
-        ),
-    )
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SCRIPT_SYSTEM}]
+        },
+        "contents": [
+            {"role": "user", "parts": [{"text": user_prompt}]}
+        ],
+        "generationConfig": {
+            "temperature": 0.85,
+            "maxOutputTokens": 8192,
+        },
+    }
 
-    raw = response.text
+    raw = _generate_content_rest(api_key, model_id, payload)
     parsed = _parse(raw)
     parsed["thumbnail_urls"] = thumbnail_urls
     parsed["_used_model"] = model_id
@@ -310,30 +330,33 @@ def _analyze_thumbnails_with_key(
     new_description: str,
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> list[str]:
-    client = _client(api_key)
-
     prompts: list[str] = []
+
     for image_bytes, _ in thumbnail_data_list[:3]:
         try:
-            image_part = genai_types.Part.from_bytes(
-                data=image_bytes, mime_type="image/jpeg"
-            )
+            b64 = base64.b64encode(image_bytes).decode("utf-8")
             prompt_text = (
                 f"Analyse this YouTube thumbnail carefully.\n\n"
                 f"Describe: layout, background, main elements, color palette, "
                 f"text style, visual effects, what makes it click-worthy.\n\n"
                 f"Then write a detailed image generation prompt in English for a "
-                f"SIMILAR thumbnail but adapted to this new video:\n"
+                f"SIMILAR thumbnail adapted to this new video:\n"
                 f"Title: {new_title}\n"
                 f"Description: {new_description[:300]}\n\n"
                 f"Keep the same visual style, mood and design approach.\n"
                 f"Output ONLY the image generation prompt, nothing else."
             )
-            resp = client.models.generate_content(
-                model=model_id,
-                contents=[prompt_text, image_part],
-            )
-            prompts.append(resp.text.strip())
+            payload = {
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt_text},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                    ],
+                }],
+            }
+            text = _generate_content_rest(api_key, model_id, payload)
+            prompts.append(text.strip())
         except Exception as e:
             prompts.append(f"[Thumbnail analysis failed: {e}]")
 
