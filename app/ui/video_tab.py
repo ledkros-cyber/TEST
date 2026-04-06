@@ -14,7 +14,9 @@ from app import database
 
 
 class VideoTab(QWidget):
-    video_created = pyqtSignal(dict)  # project data saved to DB
+    video_created = pyqtSignal(dict)   # project data saved to DB
+    # Thread-safe progress signal — emitted from worker via Qt queued connection
+    _progress_signal = pyqtSignal(int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -22,12 +24,22 @@ class VideoTab(QWidget):
         self._script_data: dict = {}
         self._worker = None
         self._build_ui()
+        # Route progress updates through signal so they always run on the main thread
+        self._progress_signal.connect(self._apply_progress)
         # detect GPU after UI is shown
         QTimer.singleShot(500, self._detect_gpu)
 
     def set_audio_path(self, path: str):
         self._audio_path = path
-        self.audio_path_label.setText(os.path.basename(path) if path else "не задано")
+        if path and os.path.isfile(path):
+            self.audio_path_label.setText(os.path.basename(path))
+            self.audio_path_label.setStyleSheet("color:#4caf81; font-weight:bold;")
+            self.render_btn.setEnabled(True)
+            self._status.set_info("Аудио загружено. Укажите папку с клипами и нажмите «Создать видео».")
+        else:
+            self.audio_path_label.setText("не задано")
+            self.audio_path_label.setStyleSheet("color:#e05555;")
+            self.render_btn.setEnabled(False)
 
     def set_script_data(self, data: dict):
         self._script_data = data
@@ -43,8 +55,8 @@ class VideoTab(QWidget):
         # Info row
         info_row = QHBoxLayout()
         info_row.addWidget(QLabel("Аудио:"))
-        self.audio_path_label = QLabel("не задано")
-        self.audio_path_label.setStyleSheet("color:#9090aa;")
+        self.audio_path_label = QLabel("не задано — сначала создайте озвучку на вкладке «Озвучка»")
+        self.audio_path_label.setStyleSheet("color:#e05555;")
         info_row.addWidget(self.audio_path_label)
         info_row.addStretch()
         outer.addLayout(info_row)
@@ -227,6 +239,8 @@ class VideoTab(QWidget):
 
         self.render_btn = QPushButton("Создать видео")
         self.render_btn.setFixedWidth(160)
+        self.render_btn.setEnabled(False)   # enabled only after audio is loaded
+        self.render_btn.setToolTip("Сначала создайте озвучку на вкладке «Озвучка»")
         self.render_btn.clicked.connect(self._render)
         bottom.addWidget(self.render_btn)
         outer.addLayout(bottom)
@@ -323,9 +337,12 @@ class VideoTab(QWidget):
         self._worker.start()
 
     def _on_progress(self, pct: int, msg: str):
-        # Called from worker thread — use signals for thread safety
-        # Since VideoConfig is passed by value and callback runs in worker thread,
-        # we emit via a queued connection workaround
+        # Called from the worker thread — MUST NOT touch Qt widgets directly.
+        # Emit a signal; Qt will deliver it on the main thread via queued connection.
+        self._progress_signal.emit(pct, msg)
+
+    def _apply_progress(self, pct: int, msg: str):
+        """Slot running on the main thread — safe to update widgets."""
         self.progress.setValue(pct)
         self._progress_label.setText(msg)
 
@@ -349,6 +366,7 @@ class VideoTab(QWidget):
         self._status.set_error(f"Ошибка рендера: {msg}")
 
     def _set_busy(self, busy: bool):
-        self.render_btn.setEnabled(not busy)
+        # Only enable render button when NOT busy AND audio is loaded
+        self.render_btn.setEnabled(not busy and bool(self._audio_path))
         self.progress.setVisible(busy)
         self._progress_label.setVisible(busy)
