@@ -33,7 +33,7 @@ SCRIPT_SYSTEM = (
     "hook the viewer in the first 15 seconds, and end with a call to action."
 )
 
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1/models"
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 try:
     from PIL import Image as PILImage
@@ -135,17 +135,11 @@ def _call_with_cascade(fn, cfg: dict, *args,
 # Core REST call  (v1 API — no SDK, no v1beta)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
-    """
-    POST https://generativelanguage.googleapis.com/v1/models/{model}:generateContent
-    Returns the text of the first candidate.
-    Raises RuntimeError with a human-readable message on any error.
-    """
-    url = f"{_GEMINI_BASE}/{model_id}:generateContent?key={api_key.strip()}"
+def _post_gemini(url: str, payload: dict) -> requests.Response:
+    """POST to Gemini API, handle network errors."""
     try:
-        resp = requests.post(
-            url,
-            json=payload,
+        return requests.post(
+            url, json=payload,
             headers={"Content-Type": "application/json"},
             timeout=120,
         )
@@ -154,33 +148,65 @@ def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
     except requests.exceptions.Timeout:
         raise RuntimeError("Gemini API request timed out (>120s).")
 
-    if resp.status_code == 400:
-        err = resp.json().get("error", {})
-        raise RuntimeError(f"Gemini 400 Bad Request: {err.get('message', resp.text[:300])}")
 
-    if resp.status_code == 401 or resp.status_code == 403:
+def _parse_response(resp: requests.Response, model_id: str) -> str:
+    """Parse Gemini response → text. Raise clear errors."""
+    if resp.status_code in (401, 403):
         raise RuntimeError(
             f"Gemini API key rejected (HTTP {resp.status_code}).\n"
             "Verify your key at aistudio.google.com/app/apikey"
         )
-
     if resp.status_code == 404:
         err = resp.json().get("error", {})
         raise RuntimeError(f"404 model not found: {err.get('message', model_id)}")
-
     if resp.status_code == 429:
         raise RuntimeError(f"Gemini quota exceeded (429) for model {model_id}.")
-
+    if resp.status_code == 400:
+        err = resp.json().get("error", {})
+        raise RuntimeError(f"Gemini 400: {err.get('message', resp.text[:300])}")
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"Gemini HTTP {resp.status_code}: {resp.text[:300]}"
-        )
+        raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
 
     data = resp.json()
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected Gemini response structure: {e}\n{str(data)[:400]}")
+        # Check for safety block
+        block_reason = data.get("promptFeedback", {}).get("blockReason", "")
+        if block_reason:
+            raise RuntimeError(f"Gemini blocked the request: {block_reason}")
+        raise RuntimeError(f"Unexpected Gemini response: {e}\n{str(data)[:400]}")
+
+
+def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
+    """
+    Try v1beta first (supports system_instruction).
+    If 404 (model not on v1beta), retry on v1 with system prompt merged into contents.
+    """
+    key = api_key.strip()
+
+    # ── Attempt 1: v1beta (supports system_instruction) ──────────────────
+    url_beta = f"{_GEMINI_BASE}/{model_id}:generateContent?key={key}"
+    resp = _post_gemini(url_beta, payload)
+
+    if resp.status_code == 404:
+        # ── Attempt 2: v1 (no system_instruction — merge into contents) ──
+        payload_v1 = dict(payload)
+        sys_text = ""
+        if "system_instruction" in payload_v1:
+            parts = payload_v1.pop("system_instruction", {}).get("parts", [])
+            sys_text = "\n".join(p.get("text", "") for p in parts).strip()
+
+        if sys_text and "contents" in payload_v1:
+            # Prepend system prompt to first user message
+            first = payload_v1["contents"][0]
+            old_text = first["parts"][0].get("text", "")
+            first["parts"][0]["text"] = f"{sys_text}\n\n{old_text}"
+
+        url_v1 = f"https://generativelanguage.googleapis.com/v1/models/{model_id}:generateContent?key={key}"
+        resp = _post_gemini(url_v1, payload_v1)
+
+    return _parse_response(resp, model_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
