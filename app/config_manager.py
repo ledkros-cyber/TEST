@@ -6,6 +6,9 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 DEFAULTS = {
     "youtube_api_key": "",
     "anthropic_api_key": "",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.0-flash",
+    "ai_provider": "claude",          # "claude" or "gemini"
     "minimax_api_key": "",
     "minimax_group_id": "",
     "output_folder": "",

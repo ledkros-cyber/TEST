@@ -8,9 +8,50 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config_manager import load_config, save_config
-from app.api.claude_client import generate_script, analyze_thumbnails, count_chars
+import app.api.claude_client  as _claude
+import app.api.gemini_client  as _gemini
 from app.api.youtube_client import download_thumbnail
 from app.ui.widgets import WorkerThread, WheelSpinBox, SectionHeader, StatusBar
+
+
+def _api_generate(cfg, source_videos, master, target):
+    """Route generate_script to Claude or Gemini based on config."""
+    provider = cfg.get("ai_provider", "claude")
+    if provider == "gemini":
+        api_key  = cfg.get("gemini_api_key", "").strip()
+        model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
+        if not api_key:
+            raise RuntimeError(
+                "Gemini API key is not set.\n"
+                "Go to Settings tab and enter your Google Gemini API key.\n"
+                "Get it free at: aistudio.google.com/app/apikey"
+            )
+        return _gemini.generate_script(api_key, source_videos, master, target,
+                                       model_id=model_id)
+    else:
+        api_key = cfg.get("anthropic_api_key", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "Anthropic API key is not set.\n"
+                "Go to Settings tab and enter your Claude API key."
+            )
+        return _claude.generate_script(api_key, source_videos, master, target)
+
+
+def _api_analyze_thumbnails(cfg, pairs, title, desc):
+    """Route thumbnail analysis to Claude or Gemini."""
+    provider = cfg.get("ai_provider", "claude")
+    if provider == "gemini":
+        api_key  = cfg.get("gemini_api_key", "").strip()
+        model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
+        return _gemini.analyze_thumbnails(api_key, pairs, title, desc, model_id=model_id)
+    else:
+        api_key = cfg.get("anthropic_api_key", "").strip()
+        return _claude.analyze_thumbnails(api_key, pairs, title, desc)
+
+
+def count_chars(text):
+    return len(text)
 
 
 class ScriptTab(QWidget):
@@ -182,10 +223,7 @@ class ScriptTab(QWidget):
     # ── Actions ───────────────────────────────────────────────────────────
     def _generate(self):
         cfg = load_config()
-        api_key = cfg.get("anthropic_api_key", "")
-        if not api_key:
-            self._status.set_error("Enter Anthropic API key in Settings.")
-            return
+        provider = cfg.get("ai_provider", "claude")
         if not self._source_videos:
             self._status.set_error("First select videos on the Search tab.")
             return
@@ -193,10 +231,11 @@ class ScriptTab(QWidget):
         target = self.length_spin.value()
         master = self.master_prompt.toPlainText().strip()
         self._set_busy(True)
-        self._status.set_info("Generating script (Claude)...")
+        label = "Gemini" if provider == "gemini" else "Claude"
+        self._status.set_info(f"Generating script ({label})...")
 
         self._worker = WorkerThread(
-            generate_script, api_key, self._source_videos, master, target
+            _api_generate, cfg, self._source_videos, master, target
         )
         self._worker.finished.connect(self._on_script_done)
         self._worker.error.connect(self._on_error)
@@ -220,9 +259,15 @@ class ScriptTab(QWidget):
 
     def _analyze_thumbnails(self):
         cfg = load_config()
-        api_key = cfg.get("anthropic_api_key", "")
-        if not api_key:
-            self._status.set_error("Enter Anthropic API key in Settings.")
+        provider = cfg.get("ai_provider", "claude")
+        # Quick key check
+        key = (cfg.get("gemini_api_key") if provider == "gemini"
+               else cfg.get("anthropic_api_key", ""))
+        if not (key or "").strip():
+            self._status.set_error(
+                f"{'Gemini' if provider == 'gemini' else 'Claude'} API key not set. "
+                "Go to Settings."
+            )
             return
         if not self._source_videos:
             self._status.set_error("No source videos loaded.")
@@ -243,7 +288,7 @@ class ScriptTab(QWidget):
         self._status.set_info("Analysing thumbnails...")
 
         self._thumb_worker = WorkerThread(
-            self._run_thumb_analysis, api_key, thumbnail_urls, new_title, new_desc
+            self._run_thumb_analysis, cfg, thumbnail_urls, new_title, new_desc
         )
         self._thumb_worker.finished.connect(self._on_thumbs_done)
         self._thumb_worker.error.connect(self._on_error)
@@ -253,7 +298,7 @@ class ScriptTab(QWidget):
 
     @staticmethod
     def _run_thumb_analysis(
-        api_key: str,
+        cfg: dict,
         urls: list[str],
         new_title: str,
         new_desc: str,
@@ -265,7 +310,7 @@ class ScriptTab(QWidget):
                 pairs.append((img_bytes, ""))
             except Exception:
                 pass
-        return analyze_thumbnails(api_key, pairs, new_title, new_desc)
+        return _api_analyze_thumbnails(cfg, pairs, new_title, new_desc)
 
     def _on_thumbs_done(self, prompts: list[str]):
         for i, prompt in enumerate(prompts[:3], 1):
