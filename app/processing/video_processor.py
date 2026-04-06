@@ -15,6 +15,7 @@ import os
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,12 +24,21 @@ from typing import Callable, Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Windows: suppress black console popup windows for every subprocess call
+# ─────────────────────────────────────────────────────────────────────────────
+
+_POPEN_FLAGS: dict = {}
+if sys.platform == "win32":
+    _POPEN_FLAGS["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Locate ffmpeg / ffprobe  (bin/ folder next to project root takes priority)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_bin(name: str) -> str:
-    root   = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    local  = os.path.join(root, "bin", name + ".exe")
+    root  = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    local = os.path.join(root, "bin", name + ".exe")
     if os.path.isfile(local):
         return local
     return name   # fall back to system PATH
@@ -43,11 +53,11 @@ FFPROBE = _find_bin("ffprobe")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _probe_nvenc() -> bool:
-    """Return True if h264_nvenc is usable on this machine."""
     try:
         r = subprocess.run(
             [FFMPEG, "-hide_banner", "-encoders"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=10, **_POPEN_FLAGS,
         )
         return "h264_nvenc" in r.stdout
     except Exception:
@@ -55,18 +65,17 @@ def _probe_nvenc() -> bool:
 
 
 def _probe_cuvid() -> bool:
-    """Return True if h264_cuvid (CUDA decode) is usable."""
     try:
         r = subprocess.run(
             [FFMPEG, "-hide_banner", "-hwaccels"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=10, **_POPEN_FLAGS,
         )
         return "cuda" in r.stdout
     except Exception:
         return False
 
 
-# Cache results (called once per session)
 _NVENC_OK: Optional[bool] = None
 _CUVID_OK: Optional[bool] = None
 
@@ -86,7 +95,6 @@ def cuvid_available() -> bool:
 
 
 def get_gpu_info() -> str:
-    """Human-readable GPU status string."""
     nvenc = gpu_available()
     cuvid = cuvid_available()
     if nvenc and cuvid:
@@ -105,18 +113,18 @@ class VideoConfig:
     source_folder:  str
     audio_path:     str
     output_path:    str
-    quality:        str   = "1080p"     # "720p" or "1080p"
+    quality:        str   = "1080p"
     fps:            int   = 60
-    bg_volume:      float = 0.05        # background video audio level
-    voice_volume:   float = 1.0         # voiceover level
-    noise_intensity: int  = 8           # 0–30
+    bg_volume:      float = 0.05
+    voice_volume:   float = 1.0
+    noise_intensity: int  = 8
     clip_min_dur:   float = 3.0
     clip_max_dur:   float = 5.0
-    extra_seconds:  float = 10.0        # video longer than audio
-    script:         str   = ""          # used for subtitle generation
+    extra_seconds:  float = 10.0
+    script:         str   = ""
     subtitle_font_size: int = 32
-    use_gpu:        bool  = True        # attempt NVENC/CUDA
-    parallel_workers: int = 3           # simultaneous clip-cut jobs
+    use_gpu:        bool  = True
+    parallel_workers: int = 3
     progress_callback: Optional[Callable[[int, str], None]] = field(
         default=None, repr=False
     )
@@ -127,14 +135,44 @@ class VideoConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run(cmd: list[str], desc: str = "") -> str:
+    """Run a command, raise RuntimeError with the actual FFmpeg error (not the banner)."""
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        **_POPEN_FLAGS,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg error ({desc}):\n{result.stderr[-3000:]}")
+        # FFmpeg banner can be thousands of chars. Find the real error:
+        # It usually starts with a line like "filename: No such file" or
+        # "Error" after all the encoder/muxer listing lines.
+        stderr = result.stderr
+        # Strip the banner (lines before first blank line after "ffmpeg version")
+        # by finding the last occurrence of meaningful error text
+        lines = stderr.splitlines()
+        # Collect lines that look like errors (skip capability listings)
+        error_lines = []
+        in_error = False
+        for line in lines:
+            lo = line.lower()
+            if (
+                "error" in lo or "invalid" in lo or "failed" in lo
+                or "no such" in lo or "unable" in lo or "could not" in lo
+                or "not found" in lo or "permission" in lo
+                or line.startswith("  ")  # indented error context
+            ) and "--enable" not in line and "--disable" not in line:
+                in_error = True
+            if in_error:
+                error_lines.append(line)
+
+        # Fallback: last 40 lines
+        if not error_lines:
+            error_lines = lines[-40:]
+
+        raise RuntimeError(
+            f"FFmpeg error ({desc}):\n" + "\n".join(error_lines[-60:])
+        )
     return result.stdout
 
 
@@ -163,53 +201,43 @@ def get_video_files(folder: str) -> list[str]:
     files = []
     for ext in exts:
         files.extend(glob_module.glob(os.path.join(folder, ext)))
-    return list(set(files))   # deduplicate
+    return list(set(files))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Clip cutting  (GPU-accelerated when available)
+# Clip cutting
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cut_clip_gpu(input_path: str, start: float, duration: float, output_path: str):
-    """Cut a clip using NVENC encode (fast, stays on GPU)."""
-    cmd = [
-        FFMPEG, "-y",
+    _run([
+        FFMPEG, "-y", "-hide_banner",
         "-ss", str(start),
         "-i", input_path,
         "-t", str(duration),
-        "-c:v", "h264_nvenc",
-        "-preset", "p1",          # p1 = fastest NVENC preset
-        "-rc", "constqp",
-        "-qp", "28",              # quality – lower = better
-        "-an",
-        output_path,
-    ]
-    _run(cmd, f"cut_clip_gpu {os.path.basename(input_path)}")
+        "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "constqp", "-qp", "28",
+        "-an", output_path,
+    ], f"cut_clip_gpu {os.path.basename(input_path)}")
 
 
 def _cut_clip_cpu(input_path: str, start: float, duration: float, output_path: str):
-    """Cut a clip using libx264 ultrafast (CPU fallback)."""
-    cmd = [
-        FFMPEG, "-y",
+    _run([
+        FFMPEG, "-y", "-hide_banner",
         "-ss", str(start),
         "-i", input_path,
         "-t", str(duration),
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "28",
-        "-an",
-        output_path,
-    ]
-    _run(cmd, f"cut_clip_cpu {os.path.basename(input_path)}")
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-an", output_path,
+    ], f"cut_clip_cpu {os.path.basename(input_path)}")
 
 
-def _cut_clip(use_gpu: bool, input_path: str, start: float, duration: float, output_path: str):
+def _cut_clip(use_gpu: bool, input_path: str, start: float,
+              duration: float, output_path: str):
     if use_gpu and gpu_available():
         try:
             _cut_clip_gpu(input_path, start, duration, output_path)
             return
         except Exception:
-            pass   # fall through to CPU
+            pass
     _cut_clip_cpu(input_path, start, duration, output_path)
 
 
@@ -220,13 +248,13 @@ def _cut_clip(use_gpu: bool, input_path: str, start: float, duration: float, out
 def _build_concat_list(clip_paths: list[str], list_path: str):
     with open(list_path, "w", encoding="utf-8") as f:
         for p in clip_paths:
-            safe = p.replace("'", "'\\''")
+            safe = p.replace("\\", "/")
             f.write(f"file '{safe}'\n")
 
 
 def _concat_clips(list_path: str, output_path: str):
     _run([
-        FFMPEG, "-y",
+        FFMPEG, "-y", "-hide_banner",
         "-f", "concat", "-safe", "0",
         "-i", list_path,
         "-c", "copy",
@@ -235,7 +263,24 @@ def _concat_clips(list_path: str, output_path: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Final render  (Legion-optimised NVENC)
+# Subtitle helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _srt_filter(srt_path: str) -> str:
+    """Build a safe subtitles= filter string for Windows paths."""
+    # On Windows, FFmpeg filter paths: backslash→slash, colon→\:
+    safe = srt_path.replace("\\", "/")
+    # Escape the drive-letter colon: C:/path → C\:/path
+    safe = re.sub(r"^([A-Za-z]):/", r"\1\\:/", safe)
+    return (
+        f"subtitles='{safe}':force_style="
+        f"'FontSize=28,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
+        f"Outline=2,Alignment=2'"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final render — GPU (NVENC)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _final_render_gpu(
@@ -244,23 +289,9 @@ def _final_render_gpu(
     noise: int, bg_volume: float, voice_volume: float,
     srt_path: Optional[str],
 ):
-    """
-    Final render with:
-    - CUDA hardware decode  → scale_cuda  → h264_nvenc
-    - Audio mix (voice + bg)
-    - Subtitle overlay (software, applied before NVENC encode)
-    - Noise filter (software)
-    """
-    # Software video filters (run before NVENC)
-    # We use hwdownload+format to come back to CPU for filters that need it,
-    # then re-upload for encoding.
     vf_parts = []
     if srt_path:
-        safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-        vf_parts.append(
-            f"subtitles='{safe_srt}':force_style="
-            f"'FontSize=28,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'"
-        )
+        vf_parts.append(_srt_filter(srt_path))
     if noise > 0:
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
     vf_parts.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease")
@@ -274,35 +305,29 @@ def _final_render_gpu(
         f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
     )
 
-    cmd = [
-        FFMPEG, "-y",
-        "-hwaccel", "cuda",
-        "-hwaccel_output_format", "cuda",
+    _run([
+        FFMPEG, "-y", "-hide_banner",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
         "-extra_hw_frames", "4",
-        "-i", raw_video,
-        "-i", audio_path,
+        "-i", raw_video, "-i", audio_path,
         "-filter_complex", filter_complex,
         "-vf", vf,
-        "-map", "0:v",
-        "-map", "[aout]",
-        # NVENC settings for Legion RTX
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",          # p4 = good quality/speed balance (p1=fastest, p7=best)
-        "-tune", "hq",
-        "-rc", "vbr",
-        "-cq", "20",              # quality target (lower = better, 18-24 is great)
-        "-b:v", "0",
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+        "-rc", "vbr", "-cq", "20", "-b:v", "0",
         "-maxrate:v", "12M" if height == 1080 else "6M",
         "-bufsize:v", "24M" if height == 1080 else "12M",
-        "-profile:v", "high",
-        "-level", "4.2",
-        "-g", str(fps * 2),       # keyframe every 2 seconds
+        "-profile:v", "high", "-level", "4.2",
+        "-g", str(fps * 2),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ]
-    _run(cmd, "final_render_gpu")
+    ], "final_render_gpu")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final render — CPU (libx264)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _final_render_cpu(
     raw_video: str, audio_path: str, output_path: str,
@@ -310,7 +335,6 @@ def _final_render_cpu(
     noise: int, bg_volume: float, voice_volume: float,
     srt_path: Optional[str],
 ):
-    """CPU fallback render with libx264."""
     vf_parts = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
@@ -318,12 +342,9 @@ def _final_render_cpu(
     ]
     if noise > 0:
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
+    # Subtitles last (after scale/pad so coordinates match final size)
     if srt_path:
-        safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-        vf_parts.append(
-            f"subtitles='{safe_srt}':force_style="
-            f"'FontSize=28,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'"
-        )
+        vf_parts.append(_srt_filter(srt_path))
     vf = ",".join(vf_parts)
 
     filter_complex = (
@@ -333,22 +354,54 @@ def _final_render_cpu(
     )
 
     cpu_cores = os.cpu_count() or 4
-    cmd = [
-        FFMPEG, "-y",
-        "-i", raw_video,
-        "-i", audio_path,
+    _run([
+        FFMPEG, "-y", "-hide_banner",
+        "-i", raw_video, "-i", audio_path,
         "-filter_complex", filter_complex,
         "-vf", vf,
         "-map", "0:v", "-map", "[aout]",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "22",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
+    ], "final_render_cpu")
+
+
+def _final_render_cpu_no_subs(
+    raw_video: str, audio_path: str, output_path: str,
+    width: int, height: int, fps: int,
+    noise: int, bg_volume: float, voice_volume: float,
+):
+    """CPU render without subtitle filter — fallback when subtitles cause errors."""
+    vf_parts = [
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+        f"fps={fps}",
     ]
-    _run(cmd, "final_render_cpu")
+    if noise > 0:
+        vf_parts.append(f"noise=alls={noise}:allf=t+u")
+    vf = ",".join(vf_parts)
+
+    filter_complex = (
+        f"[0:a]volume={bg_volume:.4f}[bga];"
+        f"[1:a]volume={voice_volume:.4f}[voa];"
+        f"[bga][voa]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+    )
+
+    cpu_cores = os.cpu_count() or 4
+    _run([
+        FFMPEG, "-y", "-hide_banner",
+        "-i", raw_video, "-i", audio_path,
+        "-filter_complex", filter_complex,
+        "-vf", vf,
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-threads", str(cpu_cores),
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        output_path,
+    ], "final_render_cpu_no_subs")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -406,7 +459,6 @@ def process_video(config: VideoConfig) -> str:
     if not video_files:
         raise RuntimeError(f"В папке '{config.source_folder}' нет видеофайлов.")
 
-    # Build list of (src, start, dur) clips until total duration reached
     clips_needed = total_video_dur
     clip_infos: list[tuple[str, float, float]] = []
     while clips_needed > 0:
@@ -417,12 +469,12 @@ def process_video(config: VideoConfig) -> str:
             continue
         if src_dur < 1.5:
             continue
-        clip_dur   = round(random.uniform(config.clip_min_dur, config.clip_max_dur), 2)
-        max_start  = max(0.0, src_dur - clip_dur - 0.5)
-        start      = round(random.uniform(0, max_start), 2) if max_start > 0 else 0.0
-        actual_dur = min(clip_dur, src_dur - start)
-        clip_infos.append((src, start, actual_dur))
-        clips_needed -= actual_dur
+        clip_dur  = round(random.uniform(config.clip_min_dur, config.clip_max_dur), 2)
+        max_start = max(0.0, src_dur - clip_dur - 0.5)
+        start     = round(random.uniform(0, max_start), 2) if max_start > 0 else 0.0
+        actual    = min(clip_dur, src_dur - start)
+        clip_infos.append((src, start, actual))
+        clips_needed -= actual
 
     cb(18, f"Нарезаем {len(clip_infos)} клипов параллельно ({config.parallel_workers} потока)...")
 
@@ -430,37 +482,34 @@ def process_video(config: VideoConfig) -> str:
         clip_paths = [os.path.join(tmpdir, f"clip_{i:04d}.mp4")
                       for i in range(len(clip_infos))]
 
-        # ── Parallel clip cutting ────────────────────────────────────────────
         done_count = 0
         with ThreadPoolExecutor(max_workers=config.parallel_workers) as ex:
             futures = {
-                ex.submit(
-                    _cut_clip, use_gpu,
-                    src, start, dur, clip_paths[i]
-                ): i
+                ex.submit(_cut_clip, use_gpu, src, start, dur, clip_paths[i]): i
                 for i, (src, start, dur) in enumerate(clip_infos)
             }
             for fut in as_completed(futures):
-                fut.result()   # re-raise any exception
+                fut.result()
                 done_count += 1
                 pct = 18 + int(done_count / len(clip_infos) * 35)
                 cb(pct, f"Клипов нарезано: {done_count}/{len(clip_infos)}")
 
-        # ── Concat ──────────────────────────────────────────────────────────
         cb(55, "Склеиваем клипы...")
         concat_list = os.path.join(tmpdir, "concat.txt")
         _build_concat_list(clip_paths, concat_list)
         raw_video = os.path.join(tmpdir, "raw_concat.mp4")
         _concat_clips(concat_list, raw_video)
 
-        # ── Subtitles ───────────────────────────────────────────────────────
+        # Subtitles (optional — skip if SRT generation fails)
         srt_path = None
         if config.script:
             cb(60, "Создаём субтитры...")
-            srt_path = os.path.join(tmpdir, "subs.srt")
-            _make_srt(config.script, audio_dur, srt_path)
+            try:
+                srt_path = os.path.join(tmpdir, "subs.srt")
+                _make_srt(config.script, audio_dur, srt_path)
+            except Exception:
+                srt_path = None   # render without subtitles on error
 
-        # ── Final render ─────────────────────────────────────────────────────
         cb(63, f"Финальный рендер {'(NVENC GPU)' if use_gpu else '(CPU)'}...")
         os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
 
@@ -469,24 +518,32 @@ def process_video(config: VideoConfig) -> str:
                 _final_render_gpu(
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
-                    config.noise_intensity,
-                    config.bg_volume, config.voice_volume, srt_path,
+                    config.noise_intensity, config.bg_volume, config.voice_volume,
+                    srt_path,
                 )
             except Exception as e:
-                cb(63, f"NVENC не сработал ({e}), переключаемся на CPU...")
+                cb(63, f"NVENC не сработал ({e!s:.120}), переключаемся на CPU...")
+                use_gpu = False   # fall through to CPU below
+
+        if not use_gpu:
+            try:
                 _final_render_cpu(
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
-                    config.noise_intensity,
-                    config.bg_volume, config.voice_volume, srt_path,
+                    config.noise_intensity, config.bg_volume, config.voice_volume,
+                    srt_path,
                 )
-        else:
-            _final_render_cpu(
-                raw_video, config.audio_path, config.output_path,
-                width, height, config.fps,
-                config.noise_intensity,
-                config.bg_volume, config.voice_volume, srt_path,
-            )
+            except Exception:
+                if srt_path:
+                    # Subtitles filter failed — retry without subtitles
+                    cb(65, "Субтитры вызвали ошибку — рендер без субтитров...")
+                    _final_render_cpu_no_subs(
+                        raw_video, config.audio_path, config.output_path,
+                        width, height, config.fps,
+                        config.noise_intensity, config.bg_volume, config.voice_volume,
+                    )
+                else:
+                    raise
 
     cb(100, "Готово!")
     return config.output_path
