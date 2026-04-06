@@ -134,8 +134,52 @@ class VideoConfig:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run(cmd: list[str], desc: str = "") -> str:
-    """Run a command; on failure show the real FFmpeg error, not the banner."""
+def _run(cmd: list[str], desc: str = "",
+         progress_cb: Optional[Callable[[int, str], None]] = None,
+         progress_start: int = 63, progress_end: int = 98,
+         total_duration: float = 0.0) -> str:
+    """Run a command; on failure show the real FFmpeg error, not the banner.
+
+    If progress_cb is provided and total_duration > 0, reads FFmpeg stderr
+    in real-time and maps encoded time → progress percentage.
+    """
+    if progress_cb and total_duration > 0:
+        # Real-time progress: read stderr line by line
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **_POPEN_FLAGS,
+        )
+        stderr_lines: list[str] = []
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            # FFmpeg writes "time=HH:MM:SS.ms" in the progress line
+            m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
+            if m:
+                t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                frac = min(t / total_duration, 1.0)
+                pct  = progress_start + int(frac * (progress_end - progress_start))
+                elapsed_str = f"{int(t // 60)}:{int(t % 60):02d}"
+                total_str   = f"{int(total_duration // 60)}:{int(total_duration % 60):02d}"
+                progress_cb(pct, f"Рендер: {elapsed_str} / {total_str}")
+        proc.wait()
+        if proc.returncode != 0:
+            stderr = "".join(stderr_lines)
+            lines  = stderr.splitlines()
+            start = 0
+            for i, ln in enumerate(lines):
+                if ln.strip() == "" and i > 0:
+                    start = i + 1
+                    break
+            relevant = lines[start:][-60:]
+            msg = "\n".join(relevant) if relevant else stderr[-2000:]
+            raise RuntimeError(f"FFmpeg error ({desc}):\n{msg}")
+        return ""
+
+    # Normal blocking run (no progress tracking)
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -146,16 +190,11 @@ def _run(cmd: list[str], desc: str = "") -> str:
     if result.returncode != 0:
         stderr = result.stderr
         lines  = stderr.splitlines()
-
-        # Skip the FFmpeg banner: everything before the first blank line
-        # that follows "ffmpeg version" or "ffprobe version"
         start = 0
         for i, ln in enumerate(lines):
             if ln.strip() == "" and i > 0:
                 start = i + 1
                 break
-
-        # From that point take the last 60 lines — actual encode messages
         relevant = lines[start:][-60:]
         msg = "\n".join(relevant) if relevant else stderr[-2000:]
         raise RuntimeError(f"FFmpeg error ({desc}):\n{msg}")
@@ -274,6 +313,8 @@ def _final_render_gpu(
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
     srt_path: Optional[str],
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    total_duration: float = 0.0,
 ):
     vf_parts = []
     if srt_path:
@@ -285,11 +326,12 @@ def _final_render_gpu(
     vf_parts.append(f"fps={fps}")
     vf = ",".join(vf_parts)
 
-    # Only voiceover — video audio is stripped at clip-cut stage
+    # NOTE: do NOT use -hwaccel_output_format cuda here — it conflicts with
+    # CPU-side filters (subtitles, noise). Use -hwaccel cuda for decode only;
+    # frames are downloaded to RAM for filtering, then encoded with h264_nvenc.
     _run([
         FFMPEG, "-y", "-hide_banner",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        "-extra_hw_frames", "4",
+        "-hwaccel", "cuda",
         "-i", raw_video, "-i", audio_path,
         "-vf", vf,
         "-map", "0:v", "-map", "1:a",
@@ -303,7 +345,8 @@ def _final_render_gpu(
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_gpu")
+    ], "final_render_gpu", progress_cb=progress_cb,
+       progress_start=63, progress_end=98, total_duration=total_duration)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,6 +358,8 @@ def _final_render_cpu(
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
     srt_path: Optional[str],
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    total_duration: float = 0.0,
 ):
     vf_parts = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
@@ -328,25 +373,28 @@ def _final_render_cpu(
     vf = ",".join(vf_parts)
 
     cpu_cores = os.cpu_count() or 4
-    # Only voiceover — no background audio from clips
+    # Use ultrafast preset — "fast" takes 10x longer for 1080p@60fps on CPU
     _run([
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
         "-vf", vf,
         "-map", "0:v", "-map", "1:a",
         "-af", f"volume={voice_volume:.4f}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_cpu")
+    ], "final_render_cpu", progress_cb=progress_cb,
+       progress_start=63, progress_end=98, total_duration=total_duration)
 
 
 def _final_render_cpu_no_subs(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    total_duration: float = 0.0,
 ):
     """CPU render without subtitle filter — fallback when subtitles cause errors."""
     vf_parts = [
@@ -365,12 +413,13 @@ def _final_render_cpu_no_subs(
         "-vf", vf,
         "-map", "0:v", "-map", "1:a",
         "-af", f"volume={voice_volume:.4f}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_cpu_no_subs")
+    ], "final_render_cpu_no_subs", progress_cb=progress_cb,
+       progress_start=65, progress_end=98, total_duration=total_duration)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,8 +528,11 @@ def process_video(config: VideoConfig) -> str:
             except Exception:
                 srt_path = None   # render without subtitles on error
 
-        cb(63, f"Финальный рендер {'(NVENC GPU)' if use_gpu else '(CPU)'}...")
+        render_label = "NVENC GPU" if use_gpu else "CPU ultrafast"
+        cb(63, f"Финальный рендер ({render_label})...")
         os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
+
+        render_duration = total_video_dur  # used for progress tracking
 
         if use_gpu:
             try:
@@ -489,9 +541,11 @@ def process_video(config: VideoConfig) -> str:
                     width, height, config.fps,
                     config.noise_intensity, config.voice_volume,
                     srt_path,
+                    progress_cb=cb, total_duration=render_duration,
                 )
             except Exception as e:
-                cb(63, f"NVENC не сработал ({e!s:.120}), переключаемся на CPU...")
+                err_short = str(e)[:120]
+                cb(63, f"NVENC не сработал ({err_short}), переключаемся на CPU ultrafast...")
                 use_gpu = False
 
         if not use_gpu:
@@ -501,6 +555,7 @@ def process_video(config: VideoConfig) -> str:
                     width, height, config.fps,
                     config.noise_intensity, config.voice_volume,
                     srt_path,
+                    progress_cb=cb, total_duration=render_duration,
                 )
             except Exception:
                 if srt_path:
@@ -509,6 +564,7 @@ def process_video(config: VideoConfig) -> str:
                         raw_video, config.audio_path, config.output_path,
                         width, height, config.fps,
                         config.noise_intensity, config.voice_volume,
+                        progress_cb=cb, total_duration=render_duration,
                     )
                 else:
                     raise
