@@ -1,36 +1,38 @@
-"""MiniMax Text-to-Audio API client.
-Official docs: https://platform.minimax.io/docs/llms.txt
+"""MiniMax Text-to-Audio V2 API client.
+Based on official MiniMax MCP source: github.com/MiniMax-AI/MiniMax-MCP
 
-Authentication:
-  Header: Authorization: Bearer {API_KEY}
-  GroupId: required — pass as URL query param ?GroupId=XXX
+Endpoints (all require ?GroupId= query param):
+  Global:      https://api.minimax.io/v1/t2a_v2?GroupId={id}
+  US-West:     https://api-uw.minimax.io/v1/t2a_v2?GroupId={id}
+  China:       https://api.minimaxi.com/v1/t2a_v2?GroupId={id}   ← note: minimaxi.com
 
-Endpoint strategy:
-  Chinese accounts (group_id ≥ 16 digits)  → .chat first, then .io
-  International accounts (short group_id)   → .io first, then .chat
-  Also tries old /v1/t2a endpoint as last resort.
+Authentication: Authorization: Bearer {API_KEY}
+GroupId: required — 19-digit account number from Account → Group Info
 """
 import os
 import requests
 
-_BASE_IO   = "https://api.minimax.io/v1/t2a_v2"
-_BASE_CHAT = "https://api.minimax.chat/v1/t2a_v2"
-# Fallback: older T2A endpoint (v1, non-v2)
-_BASE_IO_V1   = "https://api.minimax.io/v1/t2a"
-_BASE_CHAT_V1 = "https://api.minimax.chat/v1/t2a"
+# ── Official endpoints ────────────────────────────────────────────────────────
+_EP_GLOBAL  = "https://api.minimax.io/v1/t2a_v2"
+_EP_UW      = "https://api-uw.minimax.io/v1/t2a_v2"     # US-West (lower latency)
+_EP_CHINA   = "https://api.minimaxi.com/v1/t2a_v2"       # Mainland China
 
-# Models (newest first)
+# ── Models (from official const.py, newest first) ────────────────────────────
 MODELS = {
-    "speech-02-hd":     "Speech 02 HD (best quality)",
-    "speech-02-turbo":  "Speech 02 Turbo (fast)",
-    "speech-01-hd":     "Speech 01 HD",
-    "speech-01-turbo":  "Speech 01 Turbo",
+    "speech-2.8-hd":     "Speech 2.8 HD — best quality",
+    "speech-2.8-turbo":  "Speech 2.8 Turbo — fast",
+    "speech-2.6-hd":     "Speech 2.6 HD",
+    "speech-2.6-turbo":  "Speech 2.6 Turbo",
+    "speech-02-hd":      "Speech 02 HD",
+    "speech-02-turbo":   "Speech 02 Turbo",
+    "speech-01-hd":      "Speech 01 HD",
+    "speech-01-turbo":   "Speech 01 Turbo",
 }
-DEFAULT_MODEL = "speech-02-hd"
+DEFAULT_MODEL = "speech-2.6-hd"   # default per official MCP (speech-2.6-hd)
 
-# Full voice catalogue
+# ── Voice catalogue ───────────────────────────────────────────────────────────
 VOICES = {
-    # ── English ──────────────────────────────────────────────────────────
+    # English
     "English_Trustful_Man":      "EN — Trustful Man",
     "English_ReliableMan":       "EN — Reliable Man",
     "English_Friendly_Female":   "EN — Friendly Female",
@@ -57,7 +59,7 @@ VOICES = {
     "Elegant_Man":               "EN — Elegant Man",
     "Sweet_Girl_2":              "EN — Sweet Girl",
     "Exuberant_Girl":            "EN — Exuberant Girl",
-    # ── Russian / Multilingual ────────────────────────────────────────────
+    # Russian / Multilingual
     "female-shaonv":             "RU — Young Female",
     "male-qn-qingse":            "RU — Young Male",
     "female-yujie":              "RU — Professional Female",
@@ -74,35 +76,33 @@ def _is_chinese_account(group_id: str) -> bool:
 
 
 def _build_endpoints(group_id: str) -> list[str]:
-    """Return list of URLs to try, most-likely-to-work first.
-
-    Chinese accounts  → .chat first (their region), then .io
-    International     → .io first, then .chat
-    Also tries old T2A v1 endpoints as last resort.
     """
-    gid = group_id.strip() if group_id else ""
+    Return list of (url, label) to try, most-likely-to-work first.
 
-    if gid:
-        if _is_chinese_account(gid):
-            # Chinese account: .chat is the primary endpoint
-            return [
-                f"{_BASE_CHAT}?GroupId={gid}",   # China primary
-                f"{_BASE_IO}?GroupId={gid}",      # international fallback
-                f"{_BASE_CHAT_V1}?GroupId={gid}", # old v1 China
-                f"{_BASE_IO_V1}?GroupId={gid}",   # old v1 international
-            ]
-        else:
-            # International account
-            return [
-                f"{_BASE_IO}?GroupId={gid}",      # international primary
-                f"{_BASE_CHAT}?GroupId={gid}",    # China fallback
-                f"{_BASE_IO_V1}?GroupId={gid}",   # old v1
-            ]
-    else:
-        # No GroupId — try without it on both hosts
+    Per official docs GroupId is always required as a URL query parameter.
+    Chinese accounts (16+ digit GroupId) → try minimaxi.com first.
+    International → try minimax.io first.
+    """
+    gid = (group_id or "").strip()
+
+    if not gid:
+        # No GroupId — try anyway (some newer keys may not need it)
         return [
-            _BASE_IO,
-            _BASE_CHAT,
+            (_EP_GLOBAL, "api.minimax.io (no GroupId)"),
+            (_EP_CHINA,  "api.minimaxi.com (no GroupId)"),
+        ]
+
+    if _is_chinese_account(gid):
+        return [
+            (f"{_EP_CHINA}?GroupId={gid}",  "api.minimaxi.com"),   # China primary
+            (f"{_EP_GLOBAL}?GroupId={gid}", "api.minimax.io"),      # global fallback
+            (f"{_EP_UW}?GroupId={gid}",     "api-uw.minimax.io"),   # US-West
+        ]
+    else:
+        return [
+            (f"{_EP_GLOBAL}?GroupId={gid}", "api.minimax.io"),      # global primary
+            (f"{_EP_UW}?GroupId={gid}",     "api-uw.minimax.io"),   # US-West
+            (f"{_EP_CHINA}?GroupId={gid}",  "api.minimaxi.com"),    # China fallback
         ]
 
 
@@ -115,9 +115,10 @@ def generate_audio(
     volume: float = 1.0,
     model: str = DEFAULT_MODEL,
     output_path: str = "",
+    language_boost: str = "auto",
 ) -> str:
     """
-    Send text to MiniMax TTS API and save result as MP3.
+    Send text to MiniMax T2A V2 API and save result as MP3.
     Returns the path to the saved audio file.
     """
     api_key  = (api_key  or "").strip()
@@ -135,7 +136,9 @@ def generate_audio(
         "Authorization": f"Bearer {api_key}",
         "Content-Type":  "application/json",
     }
-    payload = {
+
+    # Build payload per official MCP source (minimax_mcp/server.py)
+    payload: dict = {
         "model": model,
         "text":  text,
         "stream": False,
@@ -152,15 +155,14 @@ def generate_audio(
             "channel":     1,
         },
     }
+    if language_boost and language_boost != "auto":
+        payload["language_boost"] = language_boost
 
     endpoints = _build_endpoints(group_id)
     errors: list[str] = []
     got_auth_error = False
 
-    for url in endpoints:
-        label = url.split("?")[0].replace("https://", "")
-        has_gid = "GroupId" in url
-
+    for url, label in endpoints:
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
         except requests.exceptions.ConnectionError as e:
@@ -170,14 +172,13 @@ def generate_audio(
             errors.append(f"Timeout [{label}]")
             continue
 
-        # HTTP 401 — key flat-out rejected by HTTP layer
         if resp.status_code == 401:
             got_auth_error = True
-            errors.append(f"HTTP 401 [{label}] — key rejected at HTTP level")
+            errors.append(f"HTTP 401 [{label}] — key rejected")
             continue
 
         if resp.status_code != 200:
-            errors.append(f"HTTP {resp.status_code} [{label}]: {resp.text[:150]}")
+            errors.append(f"HTTP {resp.status_code} [{label}]: {resp.text[:200]}")
             continue
 
         try:
@@ -187,23 +188,19 @@ def generate_audio(
             continue
 
         base_resp   = data.get("base_resp", {})
-        status_code = base_resp.get("status_code", 0)
+        status_code = base_resp.get("status_code", -1)
         status_msg  = base_resp.get("status_msg", "unknown")
 
-        # ── API-level errors ──────────────────────────────────────────────
         if status_code == 2049:
             got_auth_error = True
-            errors.append(
-                f"Error 2049 (invalid key{', GroupId=' + group_id if has_gid else ', no GroupId'}) "
-                f"[{label}]"
-            )
+            errors.append(f"Error 2049 (auth failed) [{label}]")
             continue
 
         if status_code != 0:
             errors.append(f"API error {status_code}: {status_msg} [{label}]")
             continue
 
-        # ── Success — decode hex audio ────────────────────────────────────
+        # ── Success — decode hex audio (official format) ──────────────────
         audio_hex = data.get("data", {}).get("audio", "")
         if not audio_hex:
             errors.append(f"Empty audio field [{label}]")
@@ -222,28 +219,28 @@ def generate_audio(
             f.write(audio_bytes)
         return output_path
 
-    # ── All endpoints failed ──────────────────────────────────────────────
+    # ── All endpoints failed ──────────────────────────────────────────────────
     attempts = "\n".join(f"  • {e}" for e in errors)
 
     if got_auth_error:
         is_cn = _is_chinese_account(group_id)
-        gid_hint = (
-            f"\n  Group ID used: {group_id} ({'Chinese account detected' if is_cn else 'international format'})"
-            if group_id
-            else "\n  Group ID: NOT SET — required for most accounts!"
+        account_type = "Chinese account detected" if is_cn else "international account format"
+        gid_info = (
+            f"\n  Group ID: {group_id} ({account_type})"
+            if group_id else
+            "\n  Group ID: NOT SET — get it from Account → Group Info on platform.minimax.io"
         )
         raise RuntimeError(
             f"MiniMax authentication failed (error 2049).\n\n"
-            f"Key used (last 6 chars): {key_hint}  |  length: {len(api_key)}"
-            f"{gid_hint}\n\n"
-            f"Most common causes:\n"
-            f"  A) Wrong API key — log in to platform.minimax.io → Account → API Keys\n"
-            f"     Copy the key EXACTLY (it should start with 'eyJ...')\n"
-            f"  B) Key has no T2A permission — check the key's permissions\n"
-            f"     on platform.minimax.io → Account → API Keys → Edit\n"
-            f"  C) Group ID mismatch — Account → Group Info → copy the number\n\n"
-            f"Tried all {len(endpoints)} endpoints — all rejected the key.\n"
-            f"All attempts:\n{attempts}"
+            f"Key (last 6 chars): {key_hint}  |  length: {len(api_key)}"
+            f"{gid_info}\n\n"
+            f"How to fix:\n"
+            f"  1. Open platform.minimax.io → log in\n"
+            f"  2. Account → API Keys → create or copy your key\n"
+            f"  3. Account → Group Info → copy the 19-digit Group ID\n"
+            f"  4. Paste BOTH into Settings tab of this app\n"
+            f"  5. Make sure the key has 'T2A' (Text-to-Audio) permission\n\n"
+            f"Tried {len(endpoints)} endpoints:\n{attempts}"
         )
 
     raise RuntimeError(
