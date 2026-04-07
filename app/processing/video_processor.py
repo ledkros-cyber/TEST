@@ -580,6 +580,11 @@ def process_video(config: VideoConfig) -> str:
         clips_needed -= actual
 
     cb(18, f"Нарезаем {len(clip_infos)} клипов параллельно ({config.parallel_workers} потока)...")
+    if log:
+        log.info(
+            f"Cutting {len(clip_infos)} clips from {len(video_files)} sources "
+            f"(audio={audio_dur:.1f}s, total_dur={total_video_dur:.1f}s)"
+        )
 
     with tempfile.TemporaryDirectory(prefix="ytgen_") as tmpdir:
         clip_paths = [os.path.join(tmpdir, f"clip_{i:04d}.mp4")
@@ -600,10 +605,14 @@ def process_video(config: VideoConfig) -> str:
                 cb(pct, f"Клипов нарезано: {done_count}/{len(clip_infos)}")
 
         cb(55, "Склеиваем клипы...")
+        if log:
+            log.info(f"Concatenating {len(clip_paths)} clips...")
         concat_list = os.path.join(tmpdir, "concat.txt")
         _build_concat_list(clip_paths, concat_list)
         raw_video = os.path.join(tmpdir, "raw_concat.mp4")
         _concat_clips(concat_list, raw_video)
+        if log:
+            log.info("Concat done")
 
         # Subtitles (optional — skip if SRT generation fails)
         srt_path = None
@@ -612,16 +621,19 @@ def process_video(config: VideoConfig) -> str:
             try:
                 srt_path = os.path.join(tmpdir, "subs.srt")
                 _make_srt(config.script, audio_dur, srt_path)
-            except Exception:
+                if log:
+                    log.info("SRT subtitles generated")
+            except Exception as srt_err:
                 srt_path = None   # render without subtitles on error
+                if log:
+                    log.warning(f"SRT generation failed, rendering without subs: {srt_err}")
 
         render_label = "NVENC GPU" if use_gpu else "CPU ultrafast"
+        render_duration = total_video_dur  # used for progress tracking
         cb(63, f"Финальный рендер ({render_label})...")
         if log:
             log.info(f"Final render start: {render_label}, duration={render_duration:.1f}s")
         os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
-
-        render_duration = total_video_dur  # used for progress tracking
 
         if use_gpu:
             try:
@@ -648,8 +660,10 @@ def process_video(config: VideoConfig) -> str:
                     srt_path,
                     progress_cb=cb, total_duration=render_duration,
                 )
-            except Exception:
+            except Exception as cpu_err:
                 if srt_path:
+                    if log:
+                        log.warning(f"CPU render with subs failed, retrying without subs: {cpu_err}")
                     cb(65, "Субтитры вызвали ошибку — рендер без субтитров...")
                     _final_render_cpu_no_subs(
                         raw_video, config.audio_path, config.output_path,
@@ -658,6 +672,8 @@ def process_video(config: VideoConfig) -> str:
                         progress_cb=cb, total_duration=render_duration,
                     )
                 else:
+                    if log:
+                        log.error(f"CPU render failed: {cpu_err}", exc_info=False)
                     raise
 
     cb(100, "Готово!")
