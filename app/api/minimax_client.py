@@ -37,44 +37,35 @@ MODELS = {
 DEFAULT_MODEL = "speech-2.6-hd"   # default per official MCP (speech-2.6-hd)
 
 # ── Voice catalogue (M = Male, F = Female) ───────────────────────────────────
+# Only standard preset voice IDs from official MiniMax API (no custom/clone IDs)
 VOICES = {
-    # ── English Male ──────────────────────────────────────────────────────────
-    "English_Trustful_Man":      "[M] EN — Trustful Man",
-    "English_ReliableMan":       "[M] EN — Reliable Man",
-    "English_Deep_Voice_Man":    "[M] EN — Deep Voice Man",
-    "English_Patient_Man":       "[M] EN — Patient Man",
-    "English_Narrator_Male":     "[M] EN — Narrator Male",
-    "Deep_Voice_Man":            "[M] EN — Deep Voice Man 2",
+    # ── English Male (universal, work on both endpoints) ─────────────────────
+    "Deep_Voice_Man":            "[M] EN — Deep Voice Man",
     "Casual_Guy":                "[M] EN — Casual Guy",
     "Young_Knight":              "[M] EN — Young Knight",
     "Determined_Man":            "[M] EN — Determined Man",
     "Decent_Boy":                "[M] EN — Decent Boy",
     "Imposing_Manner":           "[M] EN — Imposing / Authoritative",
     "Elegant_Man":               "[M] EN — Elegant Man",
-    "Patient_Man":               "[M] EN — Patient Man 2",
+    "Patient_Man":               "[M] EN — Patient Man",
+    "audiobook_male_1":          "[M] EN — Audiobook Narrator Male",
     # ── English Female ────────────────────────────────────────────────────────
-    "English_Friendly_Female":   "[F] EN — Friendly Female",
-    "English_Expressive_Female": "[F] EN — Expressive Female",
-    "English_Calm_Woman":        "[F] EN — Calm Woman",
-    "English_Lively_Girl":       "[F] EN — Lively Girl",
-    "English_Narrator_Female":   "[F] EN — Narrator Female",
     "Wise_Woman":                "[F] EN — Wise Woman",
     "Inspirational_Girl":        "[F] EN — Inspirational Girl",
-    "Calm_Woman":                "[F] EN — Calm Woman 2",
-    "Lively_Girl":               "[F] EN — Lively Girl 2",
+    "Calm_Woman":                "[F] EN — Calm Woman",
+    "Lively_Girl":               "[F] EN — Lively Girl",
     "Lovely_Girl":               "[F] EN — Lovely Girl",
     "Sweet_Girl_2":              "[F] EN — Sweet Girl",
     "Exuberant_Girl":            "[F] EN — Exuberant Girl",
     "Friendly_Person":           "[F] EN — Friendly Person",
-    # ── Russian / Multilingual Male ───────────────────────────────────────────
-    "male-qn-qingse":            "[M] RU — Young Male",
-    "male-qn-jingying":          "[M] RU — Business Male",
-    "audiobook_male_1":          "[M] RU — Narrator Male",
-    # ── Russian / Multilingual Female ────────────────────────────────────────
-    "female-shaonv":             "[F] RU — Young Female",
-    "female-yujie":              "[F] RU — Professional Female",
-    "female-chengshu":           "[F] RU — Mature Female",
-    "audiobook_female_1":        "[F] RU — Narrator Female",
+    "audiobook_female_1":        "[F] EN — Audiobook Narrator Female",
+    # ── Multilingual Male ─────────────────────────────────────────────────────
+    "male-qn-qingse":            "[M] Multi — Young Male",
+    "male-qn-jingying":          "[M] Multi — Business Male",
+    # ── Multilingual Female ───────────────────────────────────────────────────
+    "female-shaonv":             "[F] Multi — Young Female",
+    "female-yujie":              "[F] Multi — Professional Female",
+    "female-chengshu":           "[F] Multi — Mature Female",
 }
 
 
@@ -104,7 +95,7 @@ def generate_audio(
     api_key: str,
     group_id: str,
     text: str,
-    voice_id: str = "English_Trustful_Man",
+    voice_id: str = "Deep_Voice_Man",
     speed: float = 1.0,
     volume: float = 1.0,
     model: str = DEFAULT_MODEL,

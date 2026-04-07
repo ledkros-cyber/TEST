@@ -9,8 +9,8 @@ DEFAULTS = {
     "gemini_api_key": "AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38",
     "gemini_api_keys": ["AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38"],
     "gemini_key_index": 0,            # current active key index
-    "gemini_model": "gemini-3.1-flash-preview",
-    "ai_provider": "claude",          # "claude" or "gemini"
+    "gemini_model": "gemini-2.5-pro",
+    "ai_provider": "gemini",
     "minimax_api_key": "sk-api-9KrhYMFovNR1Q4d3j4gj_l8ekHBQoQ3RDl56JJNtqDy-50t_pRaNxddJMclyPUQMJPKFfpXayjE95r_ApEvAn6sKMk3OgMkzKeAIntC4s8HYtrHx45t8qEE",
     "minimax_group_id": "1947674643892540352",
     "output_folder": "",
@@ -18,15 +18,20 @@ DEFAULTS = {
     "quality": "1080p",
     "fps": 30,                         # GTX 1650 Ti: 30fps optimal, 60fps is very slow on CPU
     "bg_audio_volume": 0.05,
-    "voice_id": "female-shaonv",
+    "voice_id": "Deep_Voice_Man",
     "voice_speed": 1.0,
     "voice_volume": 1.0,
     "script_length": 800,
     "master_prompt": (
-        "Ты профессиональный сценарист YouTube-видео. "
-        "Пиши уникальный, увлекательный сценарий на русском языке, "
-        "оптимизированный под алгоритмы YouTube. "
-        "Используй разговорный стиль, держи зрителя вовлечённым."
+        "Перепиши мне этот сценарий на АНГЛИЙСКОМ языке, длина 18000 символов, "
+        "сделай его интересным, динамичным, с полезными занимательными фактами, "
+        "сильным хуком вначале сценария вовлекающим читателя дочитать его до конца, "
+        "и удерживать на протяжении всего сценария. "
+        "Стиль повествования такой же как в исходнике! Обязательно! "
+        "Проверь себя после написания на количество символов что бы оно было "
+        "в пределах того что я прописал в ТЗ выше. "
+        "Текст должен быть сразу готов к озвучиванию без заголовков и подзаголовков, "
+        "только голый текст для озвучки искусственным интелектом."
     ),
     "noise_intensity": 8,
     "subtitle_font_size": 18,
@@ -54,7 +59,10 @@ DEFAULTS = {
 
 LEGACY_MODELS = {
     "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b",
-    "gemini-2.5-pro", "gemini-pro", "gemini-ultra",
+    "gemini-pro", "gemini-ultra",
+    # gemini-3.1-* models never existed — reset to real default
+    "gemini-3.1-pro", "gemini-3.1-pro-preview",
+    "gemini-3.1-flash", "gemini-3.1-flash-preview", "gemini-3.1-flash-lite-preview",
 }
 
 
