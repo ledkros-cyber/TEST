@@ -139,14 +139,14 @@ class VideoTab(QWidget):
         row1.addStretch()
         sg_layout.addLayout(row1)
 
-        # Audio volumes
+        # Voiceover volume
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Громкость озвучки:"))
         self.voice_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.voice_vol_slider.setRange(0, 200)
         voice_vol_init = cfg.get("voice_vol_percent", 100)
         self.voice_vol_slider.setValue(voice_vol_init)
-        self.voice_vol_slider.setFixedWidth(160)
+        self.voice_vol_slider.setFixedWidth(140)
         self._voice_vol_label = QLabel(f"{voice_vol_init}%")
         self._voice_vol_label.setFixedWidth(40)
         self.voice_vol_slider.valueChanged.connect(
@@ -156,6 +156,47 @@ class VideoTab(QWidget):
         row2.addWidget(self._voice_vol_label)
         row2.addStretch()
         sg_layout.addLayout(row2)
+
+        # Background music
+        bg_group = QGroupBox("Фоновая музыка (необязательно)")
+        bg_layout = QVBoxLayout(bg_group)
+
+        bg_file_row = QHBoxLayout()
+        self.bg_music_path = QLineEdit()
+        self.bg_music_path.setText(cfg.get("bg_music_path", ""))
+        self.bg_music_path.setPlaceholderText("Выберите MP3/WAV файл фоновой музыки...")
+        bg_file_row.addWidget(self.bg_music_path)
+        bg_browse = QPushButton("Обзор")
+        bg_browse.setObjectName("secondary")
+        bg_browse.setFixedWidth(70)
+        bg_browse.clicked.connect(self._browse_bg_music)
+        bg_file_row.addWidget(bg_browse)
+        bg_clear = QPushButton("✕")
+        bg_clear.setObjectName("secondary")
+        bg_clear.setFixedWidth(28)
+        bg_clear.setToolTip("Убрать фоновую музыку")
+        bg_clear.clicked.connect(lambda: self.bg_music_path.clear())
+        bg_file_row.addWidget(bg_clear)
+        bg_layout.addLayout(bg_file_row)
+
+        bg_vol_row = QHBoxLayout()
+        bg_vol_row.addWidget(QLabel("Громкость музыки:"))
+        self.bg_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.bg_vol_slider.setRange(0, 50)   # 0–50% (bg music should be quiet)
+        bg_vol_init = int(cfg.get("bg_music_volume", 0.12) * 100)
+        self.bg_vol_slider.setValue(bg_vol_init)
+        self.bg_vol_slider.setFixedWidth(140)
+        self._bg_vol_label = QLabel(f"{bg_vol_init}%")
+        self._bg_vol_label.setFixedWidth(40)
+        self.bg_vol_slider.valueChanged.connect(
+            lambda v: self._bg_vol_label.setText(f"{v}%")
+        )
+        bg_vol_row.addWidget(self.bg_vol_slider)
+        bg_vol_row.addWidget(self._bg_vol_label)
+        bg_vol_row.addStretch()
+        bg_layout.addLayout(bg_vol_row)
+
+        sg_layout.addWidget(bg_group)
 
         # Noise & clip length
         row3 = QHBoxLayout()
@@ -256,6 +297,15 @@ class VideoTab(QWidget):
                 "padding:4px 10px; color:#f0a030; font-size:12px;"
             )
 
+    def _browse_bg_music(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите фоновую музыку",
+            os.path.expanduser("~"),
+            "Аудио файлы (*.mp3 *.wav *.aac *.ogg *.m4a)"
+        )
+        if path:
+            self.bg_music_path.setText(path)
+
     def _browse_folder(self, field: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку", field.text())
         if folder:
@@ -290,6 +340,8 @@ class VideoTab(QWidget):
         cfg["clip_max_dur"]      = self.clip_max_spin.value()
         cfg["extra_seconds"]     = self.extra_spin.value()
         cfg["source_videos_folder"] = self.source_folder.text().strip()
+        cfg["bg_music_path"]     = self.bg_music_path.text().strip()
+        cfg["bg_music_volume"]   = self.bg_vol_slider.value() / 100.0
         save_config(cfg)
 
     def _render(self):
@@ -324,6 +376,8 @@ class VideoTab(QWidget):
             script=self._script_data.get("script", ""),
             use_gpu=self.gpu_check.isChecked(),
             parallel_workers=self.workers_spin.value(),
+            bg_music_path=self.bg_music_path.text().strip(),
+            bg_music_volume=self.bg_vol_slider.value() / 100.0,
             progress_callback=self._on_progress,
         )
 

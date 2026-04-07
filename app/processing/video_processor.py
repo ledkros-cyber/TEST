@@ -118,17 +118,17 @@ class VideoConfig:
     audio_path:     str
     output_path:    str
     quality:        str   = "1080p"
-    fps:            int   = 60
-    bg_volume:      float = 0.05
+    fps:            int   = 30
     voice_volume:   float = 1.0
     noise_intensity: int  = 8
     clip_min_dur:   float = 3.0
     clip_max_dur:   float = 5.0
     extra_seconds:  float = 10.0
     script:         str   = ""
-    subtitle_font_size: int = 32
     use_gpu:        bool  = True
-    parallel_workers: int = 3
+    parallel_workers: int = 2
+    bg_music_path:  str   = ""      # optional background music file
+    bg_music_volume: float = 0.12  # background music volume (0.0–1.0)
     progress_callback: Optional[Callable[[int, str], None]] = field(
         default=None, repr=False
     )
@@ -315,8 +315,8 @@ def _srt_filter(srt_path: str) -> str:
     safe = re.sub(r"^([A-Za-z]):/", r"\1\\:/", safe)
     return (
         f"subtitles='{safe}':force_style="
-        f"'FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
-        f"Outline=2,Shadow=1,Alignment=2,MarginV=30'"
+        f"'FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
+        f"Outline=2,Shadow=1,Alignment=2,MarginV=45,Bold=1'"
     )
 
 
@@ -324,11 +324,37 @@ def _srt_filter(srt_path: str) -> str:
 # Final render — GPU (NVENC)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_audio_filter(voice_volume: float,
+                        bg_music_path: str = "",
+                        bg_music_volume: float = 0.12,
+                        voice_input_idx: int = 1,
+                        bg_input_idx: int = 2) -> tuple[list[str], str]:
+    """Build FFmpeg audio filter graph for voiceover + optional background music.
+
+    Returns (extra_inputs, af_or_filter_complex_args).
+    If bg_music_path is set: returns filter_complex mixing voice + bg music.
+    Otherwise: returns simple -af volume=... args.
+    """
+    if bg_music_path and os.path.isfile(bg_music_path):
+        # Mix voiceover + background music
+        # Voice at voice_volume, bg music at bg_music_volume, loop bg to match
+        fc = (
+            f"[{voice_input_idx}:a]volume={voice_volume:.4f}[v];"
+            f"[{bg_input_idx}:a]volume={bg_music_volume:.4f}[b];"
+            f"[v][b]amix=inputs=2:duration=first:dropout_transition=3[aout]"
+        )
+        return ["-stream_loop", "-1", "-i", bg_music_path], fc
+    else:
+        return [], ""
+
+
 def _final_render_gpu(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
     srt_path: Optional[str],
+    bg_music_path: str = "",
+    bg_music_volume: float = 0.12,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     total_duration: float = 0.0,
 ):
@@ -342,35 +368,42 @@ def _final_render_gpu(
     vf_parts.append(f"fps={fps}")
     vf = ",".join(vf_parts)
 
-    # NOTE: do NOT use -hwaccel_output_format cuda here — it conflicts with
-    # CPU-side filters (subtitles, noise). Use -hwaccel cuda for decode only;
-    # frames are downloaded to RAM for filtering, then encoded with h264_nvenc.
-    #
-    # Tuned for GTX 1650 Ti (Lenovo Legion 5):
-    #   p3 preset = good balance of speed/quality on this GPU tier
-    #   cq 23 = good quality, faster than 20
-    #   maxrate 8M = sufficient for 1080p YouTube (they re-encode anyway)
-    _run([
+    bg_extra, fc = _build_audio_filter(
+        voice_volume, bg_music_path, bg_music_volume,
+        voice_input_idx=1, bg_input_idx=2,
+    )
+
+    # Base command (video + voiceover inputs)
+    cmd = [
         FFMPEG, "-y", "-hide_banner",
         "-hwaccel", "cuda",
         "-i", raw_video, "-i", audio_path,
-        "-vf", vf,
-        "-map", "0:v", "-map", "1:a",
-        "-af", f"volume={voice_volume:.4f}",
+    ]
+    cmd += bg_extra  # optional background music input (with -stream_loop -1)
+    cmd += ["-vf", vf]
+
+    if fc:
+        # filter_complex for mixed audio
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
+
+    cmd += [
         "-c:v", "h264_nvenc",
-        "-preset", "p3",        # p1=fastest … p7=slowest; p3 = good for GTX 1650 Ti
+        "-preset", "p3",
         "-tune", "hq",
         "-rc", "vbr", "-cq", "23", "-b:v", "0",
         "-maxrate:v", "8M" if height == 1080 else "4M",
         "-bufsize:v", "16M" if height == 1080 else "8M",
         "-profile:v", "high", "-level", "4.2",
         "-g", str(fps * 2),
-        "-spatial-aq", "1",     # spatial AQ improves perceptual quality on GTX 1650 Ti
+        "-spatial-aq", "1",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_gpu", progress_cb=progress_cb,
-       progress_start=63, progress_end=98, total_duration=total_duration)
+    ]
+    _run(cmd, "final_render_gpu", progress_cb=progress_cb,
+         progress_start=63, progress_end=98, total_duration=total_duration)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,6 +415,8 @@ def _final_render_cpu(
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
     srt_path: Optional[str],
+    bg_music_path: str = "",
+    bg_music_volume: float = 0.12,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     total_duration: float = 0.0,
 ):
@@ -396,29 +431,42 @@ def _final_render_cpu(
         vf_parts.append(_srt_filter(srt_path))
     vf = ",".join(vf_parts)
 
-    # i5-10300H: 4 cores / 8 threads — use all of them
+    bg_extra, fc = _build_audio_filter(
+        voice_volume, bg_music_path, bg_music_volume,
+        voice_input_idx=1, bg_input_idx=2,
+    )
+
     cpu_cores = os.cpu_count() or 8
-    # ultrafast + tune fastdecode: optimal for i5-10300H CPU fallback
-    _run([
+    cmd = [
         FFMPEG, "-y", "-hide_banner",
         "-i", raw_video, "-i", audio_path,
-        "-vf", vf,
-        "-map", "0:v", "-map", "1:a",
-        "-af", f"volume={voice_volume:.4f}",
+    ]
+    cmd += bg_extra
+    cmd += ["-vf", vf]
+
+    if fc:
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
+
+    cmd += [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-tune", "fastdecode",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_cpu", progress_cb=progress_cb,
-       progress_start=63, progress_end=98, total_duration=total_duration)
+    ]
+    _run(cmd, "final_render_cpu", progress_cb=progress_cb,
+         progress_start=63, progress_end=98, total_duration=total_duration)
 
 
 def _final_render_cpu_no_subs(
     raw_video: str, audio_path: str, output_path: str,
     width: int, height: int, fps: int,
     noise: int, voice_volume: float,
+    bg_music_path: str = "",
+    bg_music_volume: float = 0.12,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     total_duration: float = 0.0,
 ):
@@ -432,20 +480,27 @@ def _final_render_cpu_no_subs(
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
     vf = ",".join(vf_parts)
 
+    bg_extra, fc = _build_audio_filter(
+        voice_volume, bg_music_path, bg_music_volume,
+        voice_input_idx=1, bg_input_idx=2,
+    )
     cpu_cores = os.cpu_count() or 4
-    _run([
-        FFMPEG, "-y", "-hide_banner",
-        "-i", raw_video, "-i", audio_path,
-        "-vf", vf,
-        "-map", "0:v", "-map", "1:a",
-        "-af", f"volume={voice_volume:.4f}",
+    cmd = [FFMPEG, "-y", "-hide_banner", "-i", raw_video, "-i", audio_path]
+    cmd += bg_extra
+    cmd += ["-vf", vf]
+    if fc:
+        cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
+    cmd += [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-threads", str(cpu_cores),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
-    ], "final_render_cpu_no_subs", progress_cb=progress_cb,
-       progress_start=65, progress_end=98, total_duration=total_duration)
+    ]
+    _run(cmd, "final_render_cpu_no_subs", progress_cb=progress_cb,
+         progress_start=65, progress_end=98, total_duration=total_duration)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -464,55 +519,63 @@ def _clean_script_for_subs(script: str) -> str:
     return text.strip()
 
 
-def _split_into_chunks(text: str, max_chars: int = 42) -> list[str]:
-    """Split text into lines of max_chars, max 2 lines per chunk."""
+def _split_into_one_liners(text: str, max_chars: int = 55) -> list[str]:
+    """Split text into single-line chunks of max_chars each.
+    One subtitle entry = ONE line only (no wrapping to second line).
+    """
     words = text.split()
     chunks: list[str] = []
-    line1, line2 = "", ""
+    line = ""
     for word in words:
-        # Try to add to line1
-        test = (line1 + " " + word).strip() if line1 else word
+        test = (line + " " + word).strip() if line else word
         if len(test) <= max_chars:
-            line1 = test
+            line = test
         else:
-            # line1 is full — try line2
-            test2 = (line2 + " " + word).strip() if line2 else word
-            if len(test2) <= max_chars:
-                line2 = test2
-            else:
-                # Both lines full — flush and start new chunk
-                chunk = line1
-                if line2:
-                    chunk += "\n" + line2
-                chunks.append(chunk)
-                line1 = word
-                line2 = ""
-    # Flush remaining
-    if line1 or line2:
-        chunk = line1
-        if line2:
-            chunk += "\n" + line2
-        chunks.append(chunk)
+            if line:
+                chunks.append(line)
+            line = word
+    if line:
+        chunks.append(line)
     return [c for c in chunks if c.strip()]
 
 
 def _make_srt(script: str, audio_duration: float, output_path: str):
+    """Generate SRT subtitles with word-count-based timing for better sync."""
     clean = _clean_script_for_subs(script)
-    # Split into short phrases by punctuation first
-    sentences = re.split(r'(?<=[.!?,;])\s+', clean)
+    # Split into phrases by sentence-ending punctuation
+    sentences = re.split(r'(?<=[.!?])\s+', clean)
     sentences = [s.strip() for s in sentences if s.strip()]
     if not sentences:
         return
 
-    # Break long sentences into 2-line chunks (max 42 chars/line)
+    # Each sentence → one-line subtitle chunks (max 55 chars)
     chunks: list[str] = []
     for sent in sentences:
-        chunks.extend(_split_into_chunks(sent, max_chars=42))
+        chunks.extend(_split_into_one_liners(sent, max_chars=55))
 
     if not chunks:
         return
 
-    total_chars = sum(len(c.replace("\n", " ")) for c in chunks) or 1
+    # ── Better timing: word count + punctuation pause weights ────────────────
+    # Average TTS speaking rate ~2.5 words/sec. Pauses after periods: +0.25s
+    WORDS_PER_SEC = 2.5
+    PAUSE_PERIOD  = 0.30   # pause after sentence ending (. ! ?)
+    PAUSE_COMMA   = 0.12   # pause after comma/semicolon in previous chunk
+
+    # Pre-calculate duration for each chunk
+    durations: list[float] = []
+    for i, chunk in enumerate(chunks):
+        words = len(chunk.split())
+        base  = words / WORDS_PER_SEC
+        # Add pause if chunk ends with sentence-ending punctuation
+        pause = PAUSE_PERIOD if chunk.rstrip()[-1:] in ".!?" else PAUSE_COMMA
+        durations.append(max(base + pause, 0.6))
+
+    # Scale durations proportionally to fit exactly into audio_duration
+    total_raw = sum(durations)
+    if total_raw > 0:
+        scale = audio_duration / total_raw
+        durations = [d * scale for d in durations]
 
     def fmt_time(seconds: float) -> str:
         h  = int(seconds // 3600)
@@ -523,10 +586,8 @@ def _make_srt(script: str, audio_duration: float, output_path: str):
 
     with open(output_path, "w", encoding="utf-8") as f:
         current = 0.0
-        for idx, chunk in enumerate(chunks, 1):
-            char_count = len(chunk.replace("\n", " "))
-            duration   = (char_count / total_chars) * audio_duration
-            end        = current + max(duration, 0.8)
+        for idx, (chunk, dur) in enumerate(zip(chunks, durations), 1):
+            end = current + dur
             f.write(f"{idx}\n{fmt_time(current)} --> {fmt_time(end)}\n{chunk}\n\n")
             current = end
 
@@ -635,13 +696,18 @@ def process_video(config: VideoConfig) -> str:
             log.info(f"Final render start: {render_label}, duration={render_duration:.1f}s")
         os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
 
+        bg_kw = dict(
+            bg_music_path=config.bg_music_path,
+            bg_music_volume=config.bg_music_volume,
+        )
+
         if use_gpu:
             try:
                 _final_render_gpu(
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
                     config.noise_intensity, config.voice_volume,
-                    srt_path,
+                    srt_path, **bg_kw,
                     progress_cb=cb, total_duration=render_duration,
                 )
             except Exception as e:
@@ -657,7 +723,7 @@ def process_video(config: VideoConfig) -> str:
                     raw_video, config.audio_path, config.output_path,
                     width, height, config.fps,
                     config.noise_intensity, config.voice_volume,
-                    srt_path,
+                    srt_path, **bg_kw,
                     progress_cb=cb, total_duration=render_duration,
                 )
             except Exception as cpu_err:
@@ -669,6 +735,7 @@ def process_video(config: VideoConfig) -> str:
                         raw_video, config.audio_path, config.output_path,
                         width, height, config.fps,
                         config.noise_intensity, config.voice_volume,
+                        **bg_kw,
                         progress_cb=cb, total_duration=render_duration,
                     )
                 else:

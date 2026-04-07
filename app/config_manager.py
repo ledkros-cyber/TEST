@@ -42,6 +42,8 @@ DEFAULTS = {
     "bg_audio_volume": 0.05,
     "voice_vol_percent": 100,
     "bg_vol_percent": 5,
+    "bg_music_path": "",
+    "bg_music_volume": 0.12,
     "source_videos_folder": "",
     "output_folder": "",
     "min_views_filter": 100000,

@@ -36,43 +36,45 @@ MODELS = {
 }
 DEFAULT_MODEL = "speech-2.6-hd"   # default per official MCP (speech-2.6-hd)
 
-# ── Voice catalogue ───────────────────────────────────────────────────────────
+# ── Voice catalogue (M = Male, F = Female) ───────────────────────────────────
 VOICES = {
-    # English
-    "English_Trustful_Man":      "EN — Trustful Man",
-    "English_ReliableMan":       "EN — Reliable Man",
-    "English_Friendly_Female":   "EN — Friendly Female",
-    "English_Deep_Voice_Man":    "EN — Deep Voice Man",
-    "English_Expressive_Female": "EN — Expressive Female",
-    "English_Calm_Woman":        "EN — Calm Woman",
-    "English_Lively_Girl":       "EN — Lively Girl",
-    "English_Patient_Man":       "EN — Patient Man",
-    "English_Narrator_Male":     "EN — Narrator Male",
-    "English_Narrator_Female":   "EN — Narrator Female",
-    "Wise_Woman":                "EN — Wise Woman",
-    "Friendly_Person":           "EN — Friendly Person",
-    "Inspirational_Girl":        "EN — Inspirational Girl",
-    "Deep_Voice_Man":            "EN — Deep Voice Man 2",
-    "Calm_Woman":                "EN — Calm Woman 2",
-    "Casual_Guy":                "EN — Casual Guy",
-    "Lively_Girl":               "EN — Lively Girl 2",
-    "Patient_Man":               "EN — Patient Man 2",
-    "Young_Knight":              "EN — Young Knight",
-    "Determined_Man":            "EN — Determined Man",
-    "Lovely_Girl":               "EN — Lovely Girl",
-    "Decent_Boy":                "EN — Decent Boy",
-    "Imposing_Manner":           "EN — Imposing (Authoritative)",
-    "Elegant_Man":               "EN — Elegant Man",
-    "Sweet_Girl_2":              "EN — Sweet Girl",
-    "Exuberant_Girl":            "EN — Exuberant Girl",
-    # Russian / Multilingual
-    "female-shaonv":             "RU — Young Female",
-    "male-qn-qingse":            "RU — Young Male",
-    "female-yujie":              "RU — Professional Female",
-    "male-qn-jingying":          "RU — Business Male",
-    "female-chengshu":           "RU — Mature Female",
-    "audiobook_male_1":          "RU — Narrator Male",
-    "audiobook_female_1":        "RU — Narrator Female",
+    # ── English Male ──────────────────────────────────────────────────────────
+    "English_Trustful_Man":      "[M] EN — Trustful Man",
+    "English_ReliableMan":       "[M] EN — Reliable Man",
+    "English_Deep_Voice_Man":    "[M] EN — Deep Voice Man",
+    "English_Patient_Man":       "[M] EN — Patient Man",
+    "English_Narrator_Male":     "[M] EN — Narrator Male",
+    "Deep_Voice_Man":            "[M] EN — Deep Voice Man 2",
+    "Casual_Guy":                "[M] EN — Casual Guy",
+    "Young_Knight":              "[M] EN — Young Knight",
+    "Determined_Man":            "[M] EN — Determined Man",
+    "Decent_Boy":                "[M] EN — Decent Boy",
+    "Imposing_Manner":           "[M] EN — Imposing / Authoritative",
+    "Elegant_Man":               "[M] EN — Elegant Man",
+    "Patient_Man":               "[M] EN — Patient Man 2",
+    # ── English Female ────────────────────────────────────────────────────────
+    "English_Friendly_Female":   "[F] EN — Friendly Female",
+    "English_Expressive_Female": "[F] EN — Expressive Female",
+    "English_Calm_Woman":        "[F] EN — Calm Woman",
+    "English_Lively_Girl":       "[F] EN — Lively Girl",
+    "English_Narrator_Female":   "[F] EN — Narrator Female",
+    "Wise_Woman":                "[F] EN — Wise Woman",
+    "Inspirational_Girl":        "[F] EN — Inspirational Girl",
+    "Calm_Woman":                "[F] EN — Calm Woman 2",
+    "Lively_Girl":               "[F] EN — Lively Girl 2",
+    "Lovely_Girl":               "[F] EN — Lovely Girl",
+    "Sweet_Girl_2":              "[F] EN — Sweet Girl",
+    "Exuberant_Girl":            "[F] EN — Exuberant Girl",
+    "Friendly_Person":           "[F] EN — Friendly Person",
+    # ── Russian / Multilingual Male ───────────────────────────────────────────
+    "male-qn-qingse":            "[M] RU — Young Male",
+    "male-qn-jingying":          "[M] RU — Business Male",
+    "audiobook_male_1":          "[M] RU — Narrator Male",
+    # ── Russian / Multilingual Female ────────────────────────────────────────
+    "female-shaonv":             "[F] RU — Young Female",
+    "female-yujie":              "[F] RU — Professional Female",
+    "female-chengshu":           "[F] RU — Mature Female",
+    "audiobook_female_1":        "[F] RU — Narrator Female",
 }
 
 
