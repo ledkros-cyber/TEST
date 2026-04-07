@@ -26,6 +26,19 @@ try:
 except Exception:
     log = None
 
+try:
+    from app.processing.infographic_generator import (
+        plan_infographic_positions, generate_infographic_clip
+    )
+    INFOGRAPHIC_AVAILABLE = True
+except ImportError:
+    INFOGRAPHIC_AVAILABLE = False
+
+try:
+    from app.config_manager import load_config
+except Exception:
+    load_config = None  # type: ignore
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Windows: suppress black console popup windows for every subprocess call
@@ -125,6 +138,7 @@ class VideoConfig:
     clip_max_dur:   float = 5.0
     extra_seconds:  float = 10.0
     script:         str   = ""
+    use_infographics: bool = False
     use_gpu:        bool  = True
     parallel_workers: int = 2
     bg_music_path:  str   = ""      # optional background music file
@@ -672,6 +686,61 @@ def process_video(config: VideoConfig) -> str:
                 done_count += 1
                 pct = 18 + int(done_count / len(clip_infos) * 35)
                 cb(pct, f"Клипов нарезано: {done_count}/{len(clip_infos)}")
+
+        # ── Infographic insertion ─────────────────────────────────────────────────
+        if config.use_infographics and INFOGRAPHIC_AVAILABLE and config.script:
+            cb(53, "Генерируем инфографику...")
+
+            # Determine clip timestamps (cumulative time position of each clip)
+            cumulative_times = []
+            t = 0.0
+            for (_, _, dur) in clip_infos:
+                cumulative_times.append(t)
+                t += dur
+
+            positions = plan_infographic_positions(len(clip_paths), min_gap=5, max_gap=15)
+
+            if log:
+                log.info(f"Infographic positions: {positions} (out of {len(clip_paths)} clips)")
+
+            infographic_clips: dict[int, str] = {}  # position_index → clip_path
+
+            _cfg_for_infographic = load_config() if load_config is not None else {}
+
+            for idx, pos in enumerate(positions):
+                duration = round(random.uniform(5.0, 8.0), 1)
+                timestamp = cumulative_times[pos] if pos < len(cumulative_times) else audio_dur * 0.5
+
+                info_path = os.path.join(tmpdir, f"infographic_{idx:03d}.mp4")
+
+                try:
+                    generate_infographic_clip(
+                        script=config.script,
+                        timestamp=timestamp,
+                        audio_duration=audio_dur,
+                        output_path=info_path,
+                        cfg=_cfg_for_infographic,
+                        duration=duration,
+                        fps=clip_fps,
+                        width=width,
+                        height=height,
+                        ffmpeg_path=FFMPEG,
+                    )
+                    infographic_clips[pos] = info_path
+                    cb(53, f"Инфографика {idx+1}/{len(positions)} готова ({duration}с)")
+                    if log:
+                        log.info(f"Infographic {idx+1}: pos={pos}, t={timestamp:.1f}s, dur={duration}s")
+                except Exception as e:
+                    if log:
+                        log.error(f"Infographic {idx+1} failed: {e}")
+
+            # Rebuild clip_paths list with infographics interleaved
+            new_clip_paths = []
+            for i, cp in enumerate(clip_paths):
+                new_clip_paths.append(cp)
+                if i in infographic_clips:
+                    new_clip_paths.append(infographic_clips[i])
+            clip_paths = new_clip_paths
 
         cb(55, "Склеиваем клипы...")
         if log:

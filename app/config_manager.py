@@ -48,6 +48,7 @@ DEFAULTS = {
     "output_folder": "",
     "min_views_filter": 100000,
     "date_filter": "all",
+    "use_infographics": False,
 }
 
 

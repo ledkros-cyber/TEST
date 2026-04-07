@@ -235,6 +235,18 @@ class VideoTab(QWidget):
         row3.addStretch()
         sg_layout.addLayout(row3)
 
+        # Infographics
+        row_info = QHBoxLayout()
+        self.infographics_check = QCheckBox("Генерировать инфографику")
+        self.infographics_check.setChecked(cfg.get("use_infographics", False))
+        self.infographics_check.setToolTip(
+            "Вставлять AI-инфографики в случайных местах видео.\n"
+            "Требует Gemini API key. Увеличивает время рендера."
+        )
+        row_info.addWidget(self.infographics_check)
+        row_info.addStretch()
+        sg_layout.addLayout(row_info)
+
         outer.addWidget(settings_group)
 
         # Notes
@@ -342,6 +354,7 @@ class VideoTab(QWidget):
         cfg["source_videos_folder"] = self.source_folder.text().strip()
         cfg["bg_music_path"]     = self.bg_music_path.text().strip()
         cfg["bg_music_volume"]   = self.bg_vol_slider.value() / 100.0
+        cfg["use_infographics"]  = self.infographics_check.isChecked()
         save_config(cfg)
 
     def _render(self):
@@ -374,6 +387,7 @@ class VideoTab(QWidget):
             clip_max_dur=self.clip_max_spin.value(),
             extra_seconds=self.extra_spin.value(),
             script=self._script_data.get("script", ""),
+            use_infographics=self.infographics_check.isChecked(),
             use_gpu=self.gpu_check.isChecked(),
             parallel_workers=self.workers_spin.value(),
             bg_music_path=self.bg_music_path.text().strip(),
