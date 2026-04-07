@@ -1,21 +1,27 @@
 """MiniMax Text-to-Audio V2 API client.
 Based on official MiniMax MCP source: github.com/MiniMax-AI/MiniMax-MCP
 
-Endpoints (all require ?GroupId= query param):
-  Global:      https://api.minimax.io/v1/t2a_v2?GroupId={id}
-  US-West:     https://api-uw.minimax.io/v1/t2a_v2?GroupId={id}
-  China:       https://api.minimaxi.com/v1/t2a_v2?GroupId={id}   ← note: minimaxi.com
+Endpoints:
+  Global (modern JWT key, no GroupId): https://api.minimax.io/v1/t2a_v2
+  China  (modern JWT key, no GroupId): https://api.minimaxi.com/v1/t2a_v2
+  Global (legacy key, with GroupId):   https://api.minimax.io/v1/t2a_v2?GroupId={id}
+  China  (legacy key, with GroupId):   https://api.minimaxi.com/v1/t2a_v2?GroupId={id}
 
 Authentication: Authorization: Bearer {API_KEY}
-GroupId: required — 19-digit account number from Account → Group Info
+Modern JWT keys (~126 chars) embed the GroupId — no URL param needed.
+Legacy keys require ?GroupId= query param (19-digit account number).
 """
 import os
 import requests
 
+try:
+    from app.utils.logger import log
+except Exception:
+    log = None
+
 # ── Official endpoints ────────────────────────────────────────────────────────
 _EP_GLOBAL  = "https://api.minimax.io/v1/t2a_v2"
-_EP_UW      = "https://api-uw.minimax.io/v1/t2a_v2"     # US-West (lower latency)
-_EP_CHINA   = "https://api.minimaxi.com/v1/t2a_v2"       # Mainland China
+_EP_CHINA   = "https://api.minimaxi.com/v1/t2a_v2"       # Mainland China — note: minimaxi.com
 
 # ── Models (from official const.py, newest first) ────────────────────────────
 MODELS = {
@@ -70,40 +76,26 @@ VOICES = {
 }
 
 
-def _is_chinese_account(group_id: str) -> bool:
-    """Chinese MiniMax accounts have 16+ digit numeric GroupIDs."""
-    return group_id.isdigit() and len(group_id) >= 16
-
-
-def _build_endpoints(group_id: str) -> list[str]:
+def _build_endpoints(group_id: str) -> list[tuple[str, str]]:
     """
     Return list of (url, label) to try, most-likely-to-work first.
 
-    Per official docs GroupId is always required as a URL query parameter.
-    Chinese accounts (16+ digit GroupId) → try minimaxi.com first.
-    International → try minimax.io first.
+    Modern JWT keys (~126 chars) embed GroupId in the token — no URL param needed.
+    Try without GroupId first (endpoints 1 & 2), then with GroupId as fallback
+    for legacy keys (endpoints 3 & 4), always in the same fixed order.
     """
     gid = (group_id or "").strip()
 
-    if not gid:
-        # No GroupId — try anyway (some newer keys may not need it)
-        return [
-            (_EP_GLOBAL, "api.minimax.io (no GroupId)"),
-            (_EP_CHINA,  "api.minimaxi.com (no GroupId)"),
+    endpoints = [
+        (_EP_GLOBAL,                          "api.minimax.io (no GroupId)"),
+        (_EP_CHINA,                           "api.minimaxi.com (no GroupId)"),
+    ]
+    if gid:
+        endpoints += [
+            (f"{_EP_GLOBAL}?GroupId={gid}",  "api.minimax.io (GroupId)"),
+            (f"{_EP_CHINA}?GroupId={gid}",   "api.minimaxi.com (GroupId)"),
         ]
-
-    if _is_chinese_account(gid):
-        return [
-            (f"{_EP_CHINA}?GroupId={gid}",  "api.minimaxi.com"),   # China primary
-            (f"{_EP_GLOBAL}?GroupId={gid}", "api.minimax.io"),      # global fallback
-            (f"{_EP_UW}?GroupId={gid}",     "api-uw.minimax.io"),   # US-West
-        ]
-    else:
-        return [
-            (f"{_EP_GLOBAL}?GroupId={gid}", "api.minimax.io"),      # global primary
-            (f"{_EP_UW}?GroupId={gid}",     "api-uw.minimax.io"),   # US-West
-            (f"{_EP_CHINA}?GroupId={gid}",  "api.minimaxi.com"),    # China fallback
-        ]
+    return endpoints
 
 
 def generate_audio(
@@ -162,29 +154,51 @@ def generate_audio(
     errors: list[str] = []
     got_auth_error = False
 
+    if log:
+        log.info(
+            f"MiniMax TTS start: model={model}, voice={voice_id}, "
+            f"key_len={len(api_key)}, group_id={'set' if group_id else 'not set'}, "
+            f"endpoints_to_try={len(endpoints)}"
+        )
+
     for url, label in endpoints:
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
         except requests.exceptions.ConnectionError as e:
-            errors.append(f"Connection error [{label}]: {e}")
+            err_msg = f"Connection error [{label}]: {e}"
+            errors.append(err_msg)
+            if log:
+                log.api("MiniMax", label, error=f"ConnectionError: {e}")
             continue
         except requests.exceptions.Timeout:
-            errors.append(f"Timeout [{label}]")
+            err_msg = f"Timeout [{label}]"
+            errors.append(err_msg)
+            if log:
+                log.api("MiniMax", label, error="Timeout")
             continue
 
         if resp.status_code == 401:
             got_auth_error = True
             errors.append(f"HTTP 401 [{label}] — key rejected")
+            if log:
+                log.api("MiniMax", label, error="HTTP 401 key rejected")
             continue
 
         if resp.status_code != 200:
             errors.append(f"HTTP {resp.status_code} [{label}]: {resp.text[:200]}")
+            if log:
+                log.api("MiniMax", label, error=f"HTTP {resp.status_code}: {resp.text[:100]}")
             continue
+
+        if log:
+            log.api("MiniMax", label, status=resp.status_code)
 
         try:
             data = resp.json()
         except Exception:
             errors.append(f"Bad JSON [{label}]: {resp.text[:150]}")
+            if log:
+                log.api("MiniMax", label, error=f"Bad JSON: {resp.text[:80]}")
             continue
 
         base_resp   = data.get("base_resp", {})
@@ -194,22 +208,30 @@ def generate_audio(
         if status_code == 2049:
             got_auth_error = True
             errors.append(f"Error 2049 (auth failed) [{label}]")
+            if log:
+                log.api("MiniMax", label, error="API error 2049 (auth failed)")
             continue
 
         if status_code != 0:
             errors.append(f"API error {status_code}: {status_msg} [{label}]")
+            if log:
+                log.api("MiniMax", label, error=f"API error {status_code}: {status_msg}")
             continue
 
         # ── Success — decode hex audio (official format) ──────────────────
         audio_hex = data.get("data", {}).get("audio", "")
         if not audio_hex:
             errors.append(f"Empty audio field [{label}]")
+            if log:
+                log.api("MiniMax", label, error="Empty audio field in response")
             continue
 
         try:
             audio_bytes = bytes.fromhex(audio_hex)
         except ValueError as e:
             errors.append(f"Bad audio hex [{label}]: {e}")
+            if log:
+                log.api("MiniMax", label, error=f"Bad audio hex: {e}")
             continue
 
         if not output_path:
@@ -217,16 +239,20 @@ def generate_audio(
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, "wb") as f:
             f.write(audio_bytes)
+
+        if log:
+            log.info(f"MiniMax TTS success via {label}, saved to {output_path}")
         return output_path
 
     # ── All endpoints failed ──────────────────────────────────────────────────
     attempts = "\n".join(f"  • {e}" for e in errors)
 
+    if log:
+        log.error(f"MiniMax TTS failed on all {len(endpoints)} endpoints. Errors: {'; '.join(errors)}")
+
     if got_auth_error:
-        is_cn = _is_chinese_account(group_id)
-        account_type = "Chinese account detected" if is_cn else "international account format"
         gid_info = (
-            f"\n  Group ID: {group_id} ({account_type})"
+            f"\n  Group ID: {group_id} (provided)"
             if group_id else
             "\n  Group ID: NOT SET — get it from Account → Group Info on platform.minimax.io"
         )

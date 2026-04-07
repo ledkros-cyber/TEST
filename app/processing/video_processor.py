@@ -21,6 +21,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+try:
+    from app.utils.logger import log
+except Exception:
+    log = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Windows: suppress black console popup windows for every subprocess call
@@ -539,8 +544,14 @@ def process_video(config: VideoConfig) -> str:
     quality_map = {"720p": (1280, 720), "1080p": (1920, 1080)}
     width, height = quality_map.get(config.quality, (1920, 1080))
 
-    cb(5, f"Рендер: {'NVENC (GPU)' if use_gpu else 'libx264 (CPU)'} | "
-         f"{width}×{height} @ {config.fps}fps")
+    render_mode = "NVENC (GPU)" if use_gpu else "libx264 (CPU)"
+    cb(5, f"Рендер: {render_mode} | {width}×{height} @ {config.fps}fps")
+    if log:
+        log.info(
+            f"Video render START — {render_mode} | {width}×{height}@{config.fps}fps | "
+            f"workers={config.parallel_workers} | gpu={config.use_gpu} | "
+            f"output={config.output_path}"
+        )
 
     cb(8, "Определяем длину аудио...")
     audio_dur       = get_audio_duration(config.audio_path)
@@ -606,6 +617,8 @@ def process_video(config: VideoConfig) -> str:
 
         render_label = "NVENC GPU" if use_gpu else "CPU ultrafast"
         cb(63, f"Финальный рендер ({render_label})...")
+        if log:
+            log.info(f"Final render start: {render_label}, duration={render_duration:.1f}s")
         os.makedirs(os.path.dirname(os.path.abspath(config.output_path)), exist_ok=True)
 
         render_duration = total_video_dur  # used for progress tracking
@@ -622,6 +635,8 @@ def process_video(config: VideoConfig) -> str:
             except Exception as e:
                 err_short = str(e)[:120]
                 cb(63, f"NVENC не сработал ({err_short}), переключаемся на CPU ultrafast...")
+                if log:
+                    log.error(f"NVENC render failed: {e}")
                 use_gpu = False
 
         if not use_gpu:
@@ -646,4 +661,6 @@ def process_video(config: VideoConfig) -> str:
                     raise
 
     cb(100, "Готово!")
+    if log:
+        log.info(f"Video render COMPLETE → {config.output_path}")
     return config.output_path

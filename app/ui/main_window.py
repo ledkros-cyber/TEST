@@ -13,6 +13,7 @@ from app.ui.audio_tab import AudioTab
 from app.ui.video_tab import VideoTab
 from app.ui.history_tab import HistoryTab
 from app.ui.settings_tab import SettingsTab
+from app.ui.log_tab import LogTab
 from app.ui.styles import STYLESHEET
 
 
@@ -62,6 +63,7 @@ class MainWindow(QMainWindow):
         self.video_tab = VideoTab()
         self.history_tab = HistoryTab()
         self.settings_tab = SettingsTab()
+        self.log_tab = LogTab()
 
         self.tabs.addTab(self.search_tab,   "1. Поиск")
         self.tabs.addTab(self.script_tab,   "2. Сценарий")
@@ -69,6 +71,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.video_tab,    "4. Видео")
         self.tabs.addTab(self.history_tab,  "5. История")
         self.tabs.addTab(self.settings_tab, "⚙ Настройки")
+        self.tabs.addTab(self.log_tab,      "📋 Журнал")
 
         root.addWidget(self.tabs)
 

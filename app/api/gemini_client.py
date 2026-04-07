@@ -89,6 +89,11 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+try:
+    from app.utils.logger import log
+except Exception:
+    log = None
+
 GEMINI_AVAILABLE = True
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,12 +246,22 @@ def _call_with_cascade(fn, cfg: dict, *args,
 
         key_succeeded = False
         for model in models_to_try:
+            if log:
+                log.info(
+                    f"Gemini attempt: key #{key_idx + 1}/{len(keys)}, model={model}"
+                )
             try:
                 result = fn(key, *args, model_id=model, **kwargs)
                 cfg["gemini_key_index"]       = key_idx
                 cfg["_last_gemini_model"]     = model
                 cfg["_last_gemini_key_num"]   = key_idx + 1
                 cfg["_last_gemini_key_total"] = len(keys)
+                if log:
+                    log.api(
+                        "Gemini",
+                        f"{model} (key #{key_idx + 1})",
+                        status=200,
+                    )
                 try:
                     from app.config_manager import save_config
                     save_config(cfg)
@@ -255,6 +270,12 @@ def _call_with_cascade(fn, cfg: dict, *args,
                 return result
             except Exception as e:
                 last_err = e
+                if log:
+                    log.api(
+                        "Gemini",
+                        f"{model} (key #{key_idx + 1})",
+                        error=str(e)[:200],
+                    )
                 if _is_model_error(e):
                     # This model doesn't work — remove from cache and try next
                     ck = _cache_key(key)
