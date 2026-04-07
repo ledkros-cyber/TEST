@@ -4,15 +4,15 @@ import os
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "config.json")
 
 DEFAULTS = {
-    "youtube_api_key": "",
+    "youtube_api_key": "AIzaSyB-3w_DiRP02WuLCbWSkk3yZjcR8vswe7o",
     "anthropic_api_key": "",
-    "gemini_api_key": "",
-    "gemini_api_keys": [],            # list of up to 10 Gemini API keys for rotation
+    "gemini_api_key": "AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38",
+    "gemini_api_keys": ["AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38"],
     "gemini_key_index": 0,            # current active key index
     "gemini_model": "gemini-3.1-flash-preview",
     "ai_provider": "claude",          # "claude" or "gemini"
-    "minimax_api_key": "",
-    "minimax_group_id": "",
+    "minimax_api_key": "sk-api-9KrhYMFovNR1Q4d3j4gj_l8ekHBQoQ3RDl56JJNtqDy-50t_pRaNxddJMclyPUQMJPKFfpXayjE95r_ApEvAn6sKMk3OgMkzKeAIntC4s8HYtrHx45t8qEE",
+    "minimax_group_id": "1947674643892540352",
     "output_folder": "",
     "source_videos_folder": "",
     "quality": "1080p",
