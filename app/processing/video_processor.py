@@ -238,14 +238,20 @@ def get_video_files(folder: str) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cut_clip_gpu(input_path: str, start: float, duration: float,
-                  output_path: str, fps: int = 30):
-    # Force constant frame rate so all clips have identical FPS for concat
+                  output_path: str, fps: int = 30,
+                  width: int = 1920, height: int = 1080):
+    # Normalize resolution + FPS at cut time so all clips are identical for concat.
+    # This prevents NVENC "Reconfiguring filter graph" crash when source clips
+    # have mixed resolutions (e.g. 4K + 1080p in the same folder).
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        f"fps={fps}"
+    )
     _run([
         FFMPEG, "-y", "-hide_banner",
-        "-ss", str(start),
-        "-i", input_path,
-        "-t", str(duration),
-        "-vf", f"fps={fps}",
+        "-ss", str(start), "-i", input_path, "-t", str(duration),
+        "-vf", vf,
         "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "constqp", "-qp", "28",
         "-an",
         "-video_track_timescale", "90000",
@@ -254,14 +260,17 @@ def _cut_clip_gpu(input_path: str, start: float, duration: float,
 
 
 def _cut_clip_cpu(input_path: str, start: float, duration: float,
-                  output_path: str, fps: int = 30):
-    # Force constant frame rate so all clips have identical FPS for concat
+                  output_path: str, fps: int = 30,
+                  width: int = 1920, height: int = 1080):
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        f"fps={fps}"
+    )
     _run([
         FFMPEG, "-y", "-hide_banner",
-        "-ss", str(start),
-        "-i", input_path,
-        "-t", str(duration),
-        "-vf", f"fps={fps}",
+        "-ss", str(start), "-i", input_path, "-t", str(duration),
+        "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
         "-an",
         "-video_track_timescale", "90000",
@@ -270,14 +279,17 @@ def _cut_clip_cpu(input_path: str, start: float, duration: float,
 
 
 def _cut_clip(use_gpu: bool, input_path: str, start: float,
-              duration: float, output_path: str, fps: int = 30):
+              duration: float, output_path: str,
+              fps: int = 30, width: int = 1920, height: int = 1080):
     if use_gpu and gpu_available():
         try:
-            _cut_clip_gpu(input_path, start, duration, output_path, fps=fps)
+            _cut_clip_gpu(input_path, start, duration, output_path,
+                          fps=fps, width=width, height=height)
             return
         except Exception:
             pass
-    _cut_clip_cpu(input_path, start, duration, output_path, fps=fps)
+    _cut_clip_cpu(input_path, start, duration, output_path,
+                  fps=fps, width=width, height=height)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,28 +370,26 @@ def _final_render_gpu(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     total_duration: float = 0.0,
 ):
+    # Clips are already normalized to target resolution+fps during cutting.
+    # Only apply subtitle and noise filters here — no scale/pad/fps needed.
     vf_parts = []
     if srt_path:
         vf_parts.append(_srt_filter(srt_path))
     if noise > 0:
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
-    vf_parts.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease")
-    vf_parts.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
-    vf_parts.append(f"fps={fps}")
-    vf = ",".join(vf_parts)
+    vf = ",".join(vf_parts) if vf_parts else "null"
 
     bg_extra, fc = _build_audio_filter(
         voice_volume, bg_music_path, bg_music_volume,
         voice_input_idx=1, bg_input_idx=2,
     )
 
-    # Base command (video + voiceover inputs)
     cmd = [
         FFMPEG, "-y", "-hide_banner",
         "-hwaccel", "cuda",
         "-i", raw_video, "-i", audio_path,
     ]
-    cmd += bg_extra  # optional background music input (with -stream_loop -1)
+    cmd += bg_extra
     cmd += ["-vf", vf]
 
     if fc:
@@ -420,16 +430,13 @@ def _final_render_cpu(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     total_duration: float = 0.0,
 ):
-    vf_parts = [
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        f"fps={fps}",
-    ]
+    # Clips already normalized — only apply subtitle/noise filters
+    vf_parts = []
     if noise > 0:
         vf_parts.append(f"noise=alls={noise}:allf=t+u")
     if srt_path:
         vf_parts.append(_srt_filter(srt_path))
-    vf = ",".join(vf_parts)
+    vf = ",".join(vf_parts) if vf_parts else "null"
 
     bg_extra, fc = _build_audio_filter(
         voice_volume, bg_music_path, bg_music_volume,
@@ -656,7 +663,8 @@ def process_video(config: VideoConfig) -> str:
         clip_fps = min(config.fps, 60)
         with ThreadPoolExecutor(max_workers=config.parallel_workers) as ex:
             futures = {
-                ex.submit(_cut_clip, use_gpu, src, start, dur, clip_paths[i], clip_fps): i
+                ex.submit(_cut_clip, use_gpu, src, start, dur, clip_paths[i],
+                          clip_fps, width, height): i
                 for i, (src, start, dur) in enumerate(clip_infos)
             }
             for fut in as_completed(futures):
