@@ -1,47 +1,73 @@
-"""Google Gemini API client — uses REST API v1beta directly (no SDK required).
-Dynamic model discovery via ListModels endpoint — no hardcoded model IDs.
-API docs: https://ai.google.dev/api/generate-content
+"""Google Gemini API client — uses the official Google Gen AI SDK (google-genai).
+Dynamic model discovery via client.models.list() — sorted by capability preference.
+SDK docs: https://googleapis.github.io/python-genai/
 """
 import base64
 import re
-import requests
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Preference order for sorting discovered models (most capable first).
-# Models not in this list get appended at the end in discovery order.
+# SDK import with fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+    GEMINI_SDK_AVAILABLE = True
+except ImportError:
+    GEMINI_SDK_AVAILABLE = False
+    genai = None
+    genai_types = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logger (optional — app may not always provide one)
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from app.utils.logger import log
+except Exception:
+    log = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model constants — keep ALL for UI compatibility
+# ─────────────────────────────────────────────────────────────────────────────
+
+# User-configured preferred models (shown in UI selector)
+GEMINI_MODELS = {
+    "gemini-3.1-pro":           "Gemini 3.1 Pro — Флагман (сложные задачи)",
+    "gemini-3.1-pro-preview":   "Gemini 3.1 Pro Preview",
+    "gemini-3.1-flash-preview": "Gemini 3.1 Flash Preview — Быстрый",
+    "gemini-2.5-pro":           "Gemini 2.5 Pro",
+    "gemini-2.5-flash":         "Gemini 2.5 Flash",
+    "gemini-1.5-pro":           "Gemini 1.5 Pro — Большой контекст",
+    "gemini-1.5-flash":         "Gemini 1.5 Flash — Черновики",
+    "gemini-2.0-flash":         "Gemini 2.0 Flash",
+}
+
+DEFAULT_GEMINI_MODEL = "gemini-3.1-pro"  # flagship by default
+
+MAX_GEMINI_KEYS = 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model preference order — used for cascade + dynamic discovery sorting
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MODEL_PREFERENCE = [
-    # Gemini 3.1
     "gemini-3.1-pro",
     "gemini-3.1-pro-preview",
     "gemini-3.1-flash",
     "gemini-3.1-flash-preview",
-    "gemini-3.1-flash-lite",
     "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-image-preview",
-    # Gemini 3.0
-    "gemini-3-pro",
-    "gemini-3-pro-preview",
-    "gemini-3-flash",
-    "gemini-3-flash-preview",
-    # Gemini 2.5
     "gemini-2.5-pro",
     "gemini-2.5-pro-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-preview",
-    "gemini-2.5-flash-lite",
-    # Gemini 2.0
-    "gemini-2.0-pro",
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    # Gemini 1.5
     "gemini-1.5-pro",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
 ]
 
-# Fallback cascade — used ONLY when ListModels API call itself fails (network error etc.)
+# Fallback cascade — used ONLY when model discovery itself fails (network error etc.)
 # Listed from newest to oldest so the first working one gets used
 _FALLBACK_CASCADE = [
     "gemini-3.1-flash-preview",
@@ -49,52 +75,44 @@ _FALLBACK_CASCADE = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
     "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
 ]
 
-# Display names for known models (shown in UI)
-GEMINI_MODELS = {
-    "gemini-3.1-pro":               "Gemini 3.1 Pro",
-    "gemini-3.1-pro-preview":       "Gemini 3.1 Pro Preview — Latest flagship",
-    "gemini-3.1-flash":             "Gemini 3.1 Flash",
-    "gemini-3.1-flash-preview":     "Gemini 3.1 Flash Preview — Fast & capable",
-    "gemini-3.1-flash-lite":        "Gemini 3.1 Flash Lite",
-    "gemini-3.1-flash-lite-preview": "Gemini 3.1 Flash Lite Preview",
-    "gemini-3-pro-preview":         "Gemini 3 Pro Preview",
-    "gemini-3-flash-preview":       "Gemini 3 Flash Preview",
-    "gemini-3-flash":               "Gemini 3 Flash",
-    "gemini-2.5-pro":               "Gemini 2.5 Pro",
-    "gemini-2.5-flash":             "Gemini 2.5 Flash",
-    "gemini-2.5-flash-preview":     "Gemini 2.5 Flash Preview",
-    "gemini-2.0-flash":             "Gemini 2.0 Flash",
-    "gemini-1.5-pro":               "Gemini 1.5 Pro",
-    "gemini-1.5-flash":             "Gemini 1.5 Flash",
-}
-
-DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-preview"   # currently most widely available
-
-MAX_GEMINI_KEYS = 10
-
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+# ─────────────────────────────────────────────────────────────────────────────
+# System instruction used for all script generation calls
+# ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_SYSTEM = (
     "You are a professional YouTube scriptwriter. "
     "Create unique, engaging scripts based on competitor analysis. "
     "Scripts must be 100% original, SEO-optimised, conversational, "
-    "hook the viewer in the first 15 seconds, and end with a call to action."
+    "hook the viewer in the first 15 seconds, and end with a call to action. "
+    "If the script language is English, the title and description MUST also be in English."
 )
 
-try:
-    from PIL import Image as PILImage
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+# ─────────────────────────────────────────────────────────────────────────────
+# Default generation config (shared base — overridden per-call via config arg)
+# Temperature 0.75: balance creativity and logical narrative (per user requirements)
+# max_output_tokens 8192: scripts are long texts
+# ─────────────────────────────────────────────────────────────────────────────
 
-try:
-    from app.utils.logger import log
-except Exception:
-    log = None
+# Note: system_instruction is set per-call, not here
+_GEN_CONFIG_DEFAULTS = dict(
+    temperature=0.75,
+    max_output_tokens=8192,
+)
 
-GEMINI_AVAILABLE = True
+GEMINI_AVAILABLE = True  # kept for backward compat
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SDK client factory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_client(api_key: str) -> "genai.Client":
+    """Create and return a google-genai Client for the given API key."""
+    return genai.Client(api_key=api_key.strip())
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session-level model discovery cache  {api_key_prefix → [model_id, ...]}
@@ -104,77 +122,169 @@ _discovered_models_cache: dict[str, list[str]] = {}
 
 
 def _cache_key(api_key: str) -> str:
-    """Use first 12 chars of key as cache key (avoids storing full key)."""
+    """Use first 12 chars of key as cache key (avoids storing the full key)."""
     return (api_key or "").strip()[:12]
 
 
 def _discover_models(api_key: str) -> list[str]:
     """
-    Query ListModels endpoint to find all models the key can use for generateContent.
-    Returns models sorted by _MODEL_PREFERENCE (most capable first).
+    Query available models via SDK client.models.list().
+    Returns model IDs that support generateContent, sorted by _MODEL_PREFERENCE.
     Falls back to _FALLBACK_CASCADE on any error.
     """
     ck = _cache_key(api_key)
     if ck in _discovered_models_cache:
         return _discovered_models_cache[ck]
 
-    key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-    try:
-        resp = requests.get(url, timeout=15)
-    except Exception:
-        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
-        return list(_FALLBACK_CASCADE)
-
-    if resp.status_code != 200:
+    if not GEMINI_SDK_AVAILABLE:
         _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
         return list(_FALLBACK_CASCADE)
 
     try:
-        data = resp.json()
-    except Exception:
+        client = _make_client(api_key)
+        available: list[str] = []
+
+        for model in client.models.list():
+            name: str = getattr(model, "name", "") or ""
+            # Strip "models/" prefix that the API returns
+            model_id = name.removeprefix("models/") if name.startswith("models/") else name
+            if not model_id:
+                continue
+
+            # Filter to only models that support content generation
+            methods = getattr(model, "supported_generation_methods", None) or []
+            if "generateContent" not in methods:
+                continue
+
+            # Skip embedding, retrieval and other non-generation models
+            skip_keywords = ("embedding", "aqa", "retrieval", "learnlm", "vision-specialist")
+            if any(kw in model_id.lower() for kw in skip_keywords):
+                continue
+
+            available.append(model_id)
+
+        if not available:
+            _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
+            return list(_FALLBACK_CASCADE)
+
+        # Sort by preference: preferred models first (by position in _MODEL_PREFERENCE)
+        pref_index = {m: i for i, m in enumerate(_MODEL_PREFERENCE)}
+        not_listed = len(_MODEL_PREFERENCE)
+
+        def sort_key(m: str) -> tuple:
+            # Exact match first, then preserve discovery order for unknown models
+            return (pref_index.get(m, not_listed), m)
+
+        available.sort(key=sort_key)
+
+        _discovered_models_cache[ck] = available
+        return available
+
+    except Exception as exc:
+        if log:
+            log.info(f"Gemini model discovery failed, using fallback cascade: {exc}")
         _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
         return list(_FALLBACK_CASCADE)
 
-    models_raw = data.get("models", [])
-    available: list[str] = []
-    for m in models_raw:
-        name = m.get("name", "")           # e.g. "models/gemini-2.5-flash"
-        methods = m.get("supportedGenerationMethods", [])
-        if "generateContent" not in methods:
-            continue
-        # Strip "models/" prefix
-        model_id = name.removeprefix("models/")
-        if not model_id:
-            continue
-        # Skip experimental/embed/vision-only models we don't want
-        skip_keywords = ("embedding", "aqa", "retrieval", "learnlm", "vision-specialist")
-        if any(kw in model_id.lower() for kw in skip_keywords):
-            continue
-        available.append(model_id)
 
-    if not available:
-        _discovered_models_cache[ck] = list(_FALLBACK_CASCADE)
-        return list(_FALLBACK_CASCADE)
-
-    # Sort by preference: preferred models first (by position in _MODEL_PREFERENCE)
-    pref_index = {m: i for i, m in enumerate(_MODEL_PREFERENCE)}
-    NOT_LISTED = len(_MODEL_PREFERENCE)
-
-    def sort_key(m: str) -> tuple:
-        # Exact match first, then check prefix (handles -preview variants not in list)
-        idx = pref_index.get(m, NOT_LISTED)
-        return (idx, m)
-
-    available.sort(key=sort_key)
-
-    _discovered_models_cache[ck] = available
-    return available
-
-
-def clear_model_cache():
-    """Clear cached model lists (called after changing API keys)."""
+def clear_model_cache() -> None:
+    """Clear cached model lists (call after changing API keys)."""
     _discovered_models_cache.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core SDK call — replaces _post_gemini / _parse_response / _generate_content_rest
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generate_with_sdk(
+    api_key: str,
+    model_id: str,
+    user_prompt: str,
+    system_instruction: str = "",
+    image_data_list: list[tuple[bytes, str]] | None = None,
+) -> str:
+    """
+    Send a request to Gemini using the official SDK.
+
+    Supports:
+    - Text-only prompts
+    - Multi-modal (text + images via inline_data)
+    - System instructions
+    - Per-call generation config (temperature=0.75, max_output_tokens=8192)
+
+    Error handling:
+    - 404 errors → raise RuntimeError with "404" in message (triggers model cascade)
+    - 429 / quota errors → raise RuntimeError with "quota" in message (triggers key rotation)
+    - Auth errors → raise RuntimeError with HTTP code in message
+    - Other errors → re-raise with clear message
+    """
+    if not GEMINI_SDK_AVAILABLE:
+        raise RuntimeError(
+            "google-genai not installed. Run: pip install google-genai"
+        )
+
+    client = _make_client(api_key)
+
+    # Build the parts list: images first (if any), then the text prompt
+    types = genai_types
+    parts = []
+    if image_data_list:
+        for img_bytes, mime_type in image_data_list:
+            parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+    parts.append(types.Part.from_text(text=user_prompt))
+
+    contents = [types.Content(role="user", parts=parts)]
+
+    # Per-call config — system_instruction included when provided
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction if system_instruction else None,
+        temperature=0.75,
+        max_output_tokens=8192,
+    )
+
+    try:
+        response = client.models.generate_content(
+            model=model_id,
+            contents=contents,
+            config=config,
+        )
+    except Exception as exc:
+        # Map SDK errors to messages our cascade understands
+        e_str = str(exc)
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+
+        if code == 404 or "404" in e_str or "not found" in e_str.lower():
+            raise RuntimeError(
+                f"404 model not found: {model_id} — {e_str[:200]}"
+            )
+        if (
+            code == 429
+            or "429" in e_str
+            or "quota" in e_str.lower()
+            or "resource_exhausted" in e_str.lower()
+        ):
+            raise RuntimeError(
+                f"Gemini quota exceeded (429) for model {model_id}."
+            )
+        if (
+            code in (401, 403)
+            or "api key" in e_str.lower()
+            or "invalid" in e_str.lower()
+        ):
+            raise RuntimeError(
+                f"Gemini API key rejected (HTTP {code}): {e_str[:200]}"
+            )
+        raise RuntimeError(f"Gemini SDK error: {e_str[:300]}")
+
+    # Extract text from the response
+    try:
+        return response.text
+    except Exception:
+        # Check whether the request was blocked
+        feedback = getattr(response, "prompt_feedback", None)
+        if feedback and getattr(feedback, "block_reason", None):
+            raise RuntimeError(f"Gemini blocked: {feedback.block_reason}")
+        raise RuntimeError(f"Empty Gemini response for model {model_id}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +292,7 @@ def clear_model_cache():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_active_keys(cfg: dict) -> list[str]:
+    """Return a list of non-empty Gemini API keys from the config dict."""
     keys = []
     for k in cfg.get("gemini_api_keys", []):
         k = (k or "").strip()
@@ -195,11 +306,13 @@ def get_active_keys(cfg: dict) -> list[str]:
 
 
 def _is_quota_error(e: Exception) -> bool:
+    """Return True if the exception looks like a quota / rate-limit error."""
     msg = str(e).lower()
     return "quota" in msg or "429" in msg or "resource_exhausted" in msg or "rate" in msg
 
 
 def _is_model_error(e: Exception) -> bool:
+    """Return True if the exception indicates the model is unavailable / not found."""
     msg = str(e).lower()
     return (
         "404" in msg or "not_found" in msg or "not found" in msg
@@ -209,11 +322,19 @@ def _is_model_error(e: Exception) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cascade + rotation dispatcher
+# Cascade + key-rotation dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_with_cascade(fn, cfg: dict, *args,
                        model_id: str = DEFAULT_GEMINI_MODEL, **kwargs):
+    """
+    Call fn(api_key, *args, model_id=..., **kwargs) with automatic:
+    - Key rotation (cycles through all configured keys)
+    - Model cascade (falls through discovered models on 404)
+    - Quota handling (moves to next key on 429)
+
+    fn must accept (api_key: str, ..., model_id: str) as its signature.
+    """
     keys = get_active_keys(cfg)
     if not keys:
         raise RuntimeError(
@@ -233,7 +354,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
         # Discover models available for this specific key
         models_for_key = _discover_models(key)
 
-        # If caller specified a preferred model and it's in the list, start from it;
+        # If the caller specified a preferred model and it's available, start from it;
         # otherwise start from the beginning (most capable)
         if model_id in models_for_key:
             start_model_idx = models_for_key.index(model_id)
@@ -242,9 +363,8 @@ def _call_with_cascade(fn, cfg: dict, *args,
 
         models_to_try = models_for_key[start_model_idx:]
         if not models_to_try:
-            models_to_try = models_for_key  # safety
+            models_to_try = models_for_key  # safety fallback
 
-        key_succeeded = False
         for model in models_to_try:
             if log:
                 log.info(
@@ -252,6 +372,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
                 )
             try:
                 result = fn(key, *args, model_id=model, **kwargs)
+                # Persist successful key index and metadata
                 cfg["gemini_key_index"]       = key_idx
                 cfg["_last_gemini_model"]     = model
                 cfg["_last_gemini_key_num"]   = key_idx + 1
@@ -277,7 +398,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
                         error=str(e)[:200],
                     )
                 if _is_model_error(e):
-                    # This model doesn't work — remove from cache and try next
+                    # This model doesn't work — evict from cache and try the next one
                     ck = _cache_key(key)
                     cached = _discovered_models_cache.get(ck, [])
                     if model in cached:
@@ -285,10 +406,9 @@ def _call_with_cascade(fn, cfg: dict, *args,
                     continue
                 elif _is_quota_error(e):
                     # Quota exhausted for this key — move to next key
-                    key_succeeded = False
                     break
                 else:
-                    raise   # auth/network error — propagate immediately
+                    raise  # auth / network errors — propagate immediately
 
     tried_models = list({m for k in keys for m in _discover_models(k)})
     tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
@@ -302,82 +422,6 @@ def _call_with_cascade(fn, cfg: dict, *args,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core REST call
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _post_gemini(url: str, payload: dict) -> requests.Response:
-    """POST to Gemini API, handle network errors."""
-    try:
-        return requests.post(
-            url, json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=120,
-        )
-    except requests.exceptions.ConnectionError as e:
-        raise RuntimeError(f"Network error reaching Gemini API: {e}")
-    except requests.exceptions.Timeout:
-        raise RuntimeError("Gemini API request timed out (>120s).")
-
-
-def _parse_response(resp: requests.Response, model_id: str) -> str:
-    """Parse Gemini response → text. Raise clear errors."""
-    if resp.status_code in (401, 403):
-        raise RuntimeError(
-            f"Gemini API key rejected (HTTP {resp.status_code}).\n"
-            "Verify your key at aistudio.google.com/app/apikey"
-        )
-    if resp.status_code == 404:
-        err = resp.json().get("error", {})
-        raise RuntimeError(f"404 model not found: {err.get('message', model_id)}")
-    if resp.status_code == 429:
-        raise RuntimeError(f"Gemini quota exceeded (429) for model {model_id}.")
-    if resp.status_code == 400:
-        err = resp.json().get("error", {})
-        raise RuntimeError(f"Gemini 400: {err.get('message', resp.text[:300])}")
-    if resp.status_code != 200:
-        raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
-
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as e:
-        block_reason = data.get("promptFeedback", {}).get("blockReason", "")
-        if block_reason:
-            raise RuntimeError(f"Gemini blocked the request: {block_reason}")
-        raise RuntimeError(f"Unexpected Gemini response: {e}\n{str(data)[:400]}")
-
-
-def _generate_content_rest(api_key: str, model_id: str, payload: dict) -> str:
-    """
-    Try v1beta first (supports system_instruction).
-    If 404 (model not on v1beta), retry on v1 with system prompt merged into contents.
-    """
-    key = api_key.strip()
-
-    # ── Attempt 1: v1beta (supports system_instruction) ──────────────────
-    url_beta = f"{_GEMINI_BASE}/{model_id}:generateContent?key={key}"
-    resp = _post_gemini(url_beta, payload)
-
-    if resp.status_code == 404:
-        # ── Attempt 2: v1 (no system_instruction — merge into contents) ──
-        payload_v1 = dict(payload)
-        sys_text = ""
-        if "system_instruction" in payload_v1:
-            parts = payload_v1.pop("system_instruction", {}).get("parts", [])
-            sys_text = "\n".join(p.get("text", "") for p in parts).strip()
-
-        if sys_text and "contents" in payload_v1:
-            first = payload_v1["contents"][0]
-            old_text = first["parts"][0].get("text", "")
-            first["parts"][0]["text"] = f"{sys_text}\n\n{old_text}"
-
-        url_v1 = f"https://generativelanguage.googleapis.com/v1/models/{model_id}:generateContent?key={key}"
-        resp = _post_gemini(url_v1, payload_v1)
-
-    return _parse_response(resp, model_id)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Public API — list available models for a key
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -385,7 +429,7 @@ def get_available_models(cfg: dict) -> list[str]:
     """
     Return list of model IDs available for the first active key.
     Used by Settings UI to populate the model selector.
-    Returns fallback list if no key configured or discovery fails.
+    Returns fallback list if no key is configured or discovery fails.
     """
     keys = get_active_keys(cfg)
     if not keys:
@@ -406,6 +450,12 @@ def generate_script(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> dict:
+    """
+    Generate a YouTube script from competitor source videos.
+
+    When cfg is provided, uses key rotation + model cascade via _call_with_cascade.
+    Otherwise calls directly with api_key (useful for single-key usage).
+    """
     if cfg is not None:
         return _call_with_cascade(
             _generate_script_with_key, cfg,
@@ -426,6 +476,7 @@ def _generate_script_with_key(
     language: str = "ru",
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> dict:
+    """Internal: generate a script using a specific key and model."""
     all_real_tags: list[str] = []
     sources_text = ""
     thumbnail_urls: list[str] = []
@@ -443,6 +494,7 @@ def _generate_script_with_key(
         if v.get("thumbnail"):
             thumbnail_urls.append(v["thumbnail"])
 
+    # Deduplicate tags preserving order
     seen: set[str] = set()
     unique_tags: list[str] = []
     for t in all_real_tags:
@@ -489,20 +541,12 @@ Reply STRICTLY in this format:
 [tags]
 """
 
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": SCRIPT_SYSTEM}]
-        },
-        "contents": [
-            {"role": "user", "parts": [{"text": user_prompt}]}
-        ],
-        "generationConfig": {
-            "temperature": 0.85,
-            "maxOutputTokens": 8192,
-        },
-    }
-
-    raw = _generate_content_rest(api_key, model_id, payload)
+    raw = _generate_with_sdk(
+        api_key=api_key,
+        model_id=model_id,
+        user_prompt=user_prompt,
+        system_instruction=SCRIPT_SYSTEM,
+    )
     parsed = _parse(raw)
     parsed["thumbnail_urls"] = thumbnail_urls
     parsed["_used_model"] = model_id
@@ -521,6 +565,12 @@ def analyze_thumbnails(
     model_id: str = DEFAULT_GEMINI_MODEL,
     cfg: dict | None = None,
 ) -> list[str]:
+    """
+    Analyse competitor thumbnails and generate image-generation prompts.
+
+    Returns a list of up to 3 image-generation prompt strings.
+    When cfg is provided, uses key rotation + model cascade.
+    """
     if cfg is not None:
         return _call_with_cascade(
             _analyze_thumbnails_with_key, cfg,
@@ -540,11 +590,11 @@ def _analyze_thumbnails_with_key(
     new_description: str,
     model_id: str = DEFAULT_GEMINI_MODEL,
 ) -> list[str]:
+    """Internal: analyse thumbnails using a specific key and model via SDK."""
     prompts: list[str] = []
 
-    for image_bytes, _ in thumbnail_data_list[:3]:
+    for image_bytes, mime_type in thumbnail_data_list[:3]:
         try:
-            b64 = base64.b64encode(image_bytes).decode("utf-8")
             prompt_text = (
                 f"Analyse this YouTube thumbnail carefully.\n\n"
                 f"Describe: layout, background, main elements, color palette, "
@@ -556,20 +606,17 @@ def _analyze_thumbnails_with_key(
                 f"Keep the same visual style, mood and design approach.\n"
                 f"Output ONLY the image generation prompt, nothing else."
             )
-            payload = {
-                "contents": [{
-                    "role": "user",
-                    "parts": [
-                        {"text": prompt_text},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
-                    ],
-                }],
-            }
-            text = _generate_content_rest(api_key, model_id, payload)
+            text = _generate_with_sdk(
+                api_key=api_key,
+                model_id=model_id,
+                user_prompt=prompt_text,
+                image_data_list=[(image_bytes, mime_type)],
+            )
             prompts.append(text.strip())
         except Exception as e:
             prompts.append(f"[Thumbnail analysis failed: {e}]")
 
+    # Pad to 3 prompts with generic fallbacks if we received fewer images
     styles = ["photorealistic dramatic", "bold minimalist", "vibrant neon pop-art"]
     while len(prompts) < 3:
         idx = len(prompts)
@@ -581,10 +628,15 @@ def _analyze_thumbnails_with_key(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Script parsing helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse(raw: str) -> dict:
+    """
+    Parse the structured ===SECTION=== response format produced by the LLM.
+    Returns a dict with keys: script, title, description, tags,
+    thumbnail_prompts, thumbnail_urls.
+    """
     def extract(tag: str) -> str:
         m = re.search(
             rf"==={re.escape(tag)}===\s*(.*?)(?=====[A-ZА-Яa-zа-я\s\d]+===|$)",
@@ -603,5 +655,10 @@ def _parse(raw: str) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Misc helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def count_chars(text: str) -> int:
+    """Return character count of text."""
     return len(text)
