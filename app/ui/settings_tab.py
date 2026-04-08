@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 from app.config_manager import load_config, save_config
 from app.api.gemini_client import (
     GEMINI_MODELS, DEFAULT_GEMINI_MODEL, MAX_GEMINI_KEYS,
-    get_available_models, clear_model_cache,
+    get_available_models, clear_model_cache, validate_api_key,
 )
 from app.ui.widgets import ApiKeyField, SectionHeader, StatusBar
 
@@ -107,6 +107,19 @@ class SettingsTab(QWidget):
         self._gemini_keys_layout.setContentsMargins(0, 0, 0, 0)
         self._gemini_keys_layout.setSpacing(4)
         api_form.addRow(self._gemini_keys_widget)
+
+        # Validate key button
+        validate_row = QHBoxLayout()
+        validate_btn = QPushButton("Проверить ключ")
+        validate_btn.setObjectName("secondary")
+        validate_btn.setFixedWidth(140)
+        validate_btn.setToolTip("Проверить первый Gemini API ключ (тестовый запрос)")
+        validate_btn.clicked.connect(self._validate_gemini_key)
+        validate_row.addWidget(validate_btn)
+        validate_row.addStretch()
+        vw = QWidget()
+        vw.setLayout(validate_row)
+        api_form.addRow(vw)
 
         # Populate from config
         saved_keys = cfg.get("gemini_api_keys", [])
@@ -298,6 +311,31 @@ class SettingsTab(QWidget):
         self._populate_model_combo(cfg, cur_model)
 
         self._status.set_ok(f"Settings saved! ({len(keys)} Gemini key(s) stored)")
+
+    def _validate_gemini_key(self):
+        """Test the first Gemini key and show result."""
+        keys = [f.text().strip() for f in self._gemini_key_fields if f.text().strip()]
+        if not keys:
+            self._status.set_error("Введите Gemini API ключ.")
+            return
+        self._status.set_info("Проверяю ключ...")
+        import threading
+        def _run():
+            ok, msg = validate_api_key(keys[0])
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            if ok:
+                QMetaObject.invokeMethod(
+                    self._status, "set_ok",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, msg)
+                )
+            else:
+                QMetaObject.invokeMethod(
+                    self._status, "set_error",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, msg)
+                )
+        threading.Thread(target=_run, daemon=True).start()
 
     def get_config(self) -> dict:
         return load_config()

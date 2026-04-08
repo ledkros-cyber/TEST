@@ -212,6 +212,15 @@ class ScriptTab(QWidget):
         splitter.setSizes([560, 340])
         outer.addWidget(splitter, 1)
 
+        # Token usage counter (Gemini)
+        self._token_label = QLabel("")
+        self._token_label.setStyleSheet("color:#4caf81; font-size:11px;")
+        self._token_label.setToolTip(
+            "Токены израсходованы за текущую сессию.\n"
+            "Бесплатный лимит Gemini Pro: 50 запросов/день, 2 запроса/мин."
+        )
+        outer.addWidget(self._token_label)
+
         # Bottom bar
         btm = QHBoxLayout()
         self._status = StatusBar()
@@ -313,6 +322,25 @@ class ScriptTab(QWidget):
             )
         else:
             self._status.set_ok("Script generated! Review and click 'Analyse thumbnails'.")
+
+        # Update token counter
+        self._update_token_label()
+
+    def _update_token_label(self):
+        """Refresh the session token counter label."""
+        cfg = load_config()
+        if cfg.get("ai_provider", "claude") != "gemini":
+            self._token_label.setText("")
+            return
+        stats = _gemini.get_session_token_stats()
+        if stats["requests"] == 0:
+            self._token_label.setText("")
+            return
+        self._token_label.setText(
+            f"Токены сессии: {stats['total']:,} всего  "
+            f"(ввод: {stats['input']:,} / вывод: {stats['output']:,})  "
+            f"| запросов: {stats['requests']}"
+        )
 
     def _analyze_thumbnails(self):
         cfg = load_config()

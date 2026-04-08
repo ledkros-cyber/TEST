@@ -1,5 +1,5 @@
 """Google Gemini API client — uses the official Google Gen AI SDK (google-genai).
-Dynamic model discovery via client.models.list() — sorted by capability preference.
+Dynamic model discovery via client.models.list() — Pro models only, flash/lite excluded.
 SDK docs: https://googleapis.github.io/python-genai/
 """
 import base64
@@ -106,6 +106,22 @@ _GEN_CONFIG_DEFAULTS = dict(
 GEMINI_AVAILABLE = True  # kept for backward compat
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Session-level token usage counter
+# ─────────────────────────────────────────────────────────────────────────────
+
+_session_tokens: dict = {"input": 0, "output": 0, "total": 0, "requests": 0}
+
+
+def get_session_token_stats() -> dict:
+    """Return copy of session token usage statistics."""
+    return dict(_session_tokens)
+
+
+def reset_session_tokens() -> None:
+    """Reset session token counters."""
+    _session_tokens.update({"input": 0, "output": 0, "total": 0, "requests": 0})
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SDK client factory
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -156,9 +172,20 @@ def _discover_models(api_key: str) -> list[str]:
             if "generateContent" not in methods:
                 continue
 
+            mid_lower = model_id.lower()
+
             # Skip embedding, retrieval and other non-generation models
             skip_keywords = ("embedding", "aqa", "retrieval", "learnlm", "vision-specialist")
-            if any(kw in model_id.lower() for kw in skip_keywords):
+            if any(kw in mid_lower for kw in skip_keywords):
+                continue
+
+            # STRICT: only Pro models allowed — flash and lite are too weak for scripts
+            banned_keywords = ("flash", "lite")
+            if any(kw in mid_lower for kw in banned_keywords):
+                continue
+
+            # Must contain "pro" to be a quality model
+            if "pro" not in mid_lower:
                 continue
 
             available.append(model_id)
@@ -190,6 +217,43 @@ def _discover_models(api_key: str) -> list[str]:
 def clear_model_cache() -> None:
     """Clear cached model lists (call after changing API keys)."""
     _discovered_models_cache.clear()
+
+
+def validate_api_key(api_key: str) -> tuple[bool, str]:
+    """
+    Validate a Gemini API key by calling models.list().
+    Returns (ok: bool, message: str).
+    """
+    api_key = (api_key or "").strip()
+    if not api_key:
+        return False, "Ключ не введён."
+    if not GEMINI_SDK_AVAILABLE:
+        return False, "google-genai не установлен. Запустите: pip install google-genai"
+    try:
+        client = _make_client(api_key)
+        models_found = []
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            mid = name.removeprefix("models/")
+            methods = getattr(m, "supported_generation_methods", None) or []
+            if "generateContent" in methods and "pro" in mid.lower():
+                models_found.append(mid)
+            if len(models_found) >= 3:
+                break
+        if models_found:
+            return True, f"Ключ рабочий. Pro-модели: {', '.join(models_found[:3])}"
+        return True, "Ключ рабочий (Pro-модели не найдены, возможно нет доступа)."
+    except Exception as exc:
+        e_str = str(exc)
+        if "leaked" in e_str.lower() or "reported" in e_str.lower():
+            return False, "Ключ скомпрометирован (leaked). Создайте новый на aistudio.google.com/app/apikey"
+        if "expired" in e_str.lower():
+            return False, "Ключ истёк. Создайте новый на aistudio.google.com/app/apikey"
+        if "api key" in e_str.lower() or "invalid" in e_str.lower() or "400" in e_str or "403" in e_str:
+            return False, "Неверный API-ключ. Проверьте ключ на aistudio.google.com/app/apikey"
+        if "429" in e_str or "quota" in e_str.lower():
+            return True, "Ключ рабочий, но квота исчерпана (лимит запросов)."
+        return False, f"Ошибка: {e_str[:150]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,7 +328,9 @@ def _generate_with_sdk(
             or "resource_exhausted" in e_str.lower()
         ):
             raise RuntimeError(
-                f"Gemini quota exceeded (429) for model {model_id}."
+                f"Gemini quota exceeded (429) for model {model_id}.\n\n"
+                f"Бесплатный лимит Gemini Pro: 50 запросов в день / 2 в минуту.\n"
+                f"Подождите минуту или добавьте другой API-ключ в Настройках."
             )
         if (
             code in (401, 403)
@@ -275,6 +341,20 @@ def _generate_with_sdk(
                 f"Gemini API key rejected (HTTP {code}): {e_str[:200]}"
             )
         raise RuntimeError(f"Gemini SDK error: {e_str[:300]}")
+
+    # Track token usage from usageMetadata
+    try:
+        meta = getattr(response, "usage_metadata", None)
+        if meta:
+            inp = getattr(meta, "prompt_token_count", 0) or 0
+            out = getattr(meta, "candidates_token_count", 0) or 0
+            tot = getattr(meta, "total_token_count", 0) or (inp + out)
+            _session_tokens["input"]    += inp
+            _session_tokens["output"]   += out
+            _session_tokens["total"]    += tot
+            _session_tokens["requests"] += 1
+    except Exception:
+        pass
 
     # Extract text from the response
     try:
