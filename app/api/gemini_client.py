@@ -391,6 +391,20 @@ def _is_quota_error(e: Exception) -> bool:
     return "quota" in msg or "429" in msg or "resource_exhausted" in msg or "rate" in msg
 
 
+def _is_key_invalid_error(e: Exception) -> bool:
+    """Return True if the key itself is invalid/expired/revoked — try next key."""
+    msg = str(e).lower()
+    return (
+        "expired" in msg
+        or "leaked" in msg
+        or "api_key_invalid" in msg
+        or "key rejected" in msg
+        or ("400" in msg and ("invalid" in msg or "expired" in msg))
+        or ("403" in msg and "key" in msg)
+        or "permission_denied" in msg
+    )
+
+
 def _is_model_error(e: Exception) -> bool:
     """Return True if the exception indicates the model is unavailable / not found."""
     msg = str(e).lower()
@@ -506,17 +520,32 @@ def _call_with_cascade(fn, cfg: dict, *args,
                                 f"Все {len(keys)} ключ(а/ей) исчерпаны."
                             )
                     break
+                elif _is_key_invalid_error(e):
+                    # Key is expired/revoked/leaked — skip to next key
+                    if log:
+                        log.info(
+                            f"Ключ #{key_idx + 1} — недействителен (истёк/отозван). "
+                            f"Переключаюсь на следующий ключ."
+                        )
+                    break
                 else:
-                    raise  # auth / network errors — propagate immediately
+                    raise  # network errors — propagate immediately
 
     # Build a clear final error message
     if quota_exhausted_keys and len(quota_exhausted_keys) == len(keys):
         raise RuntimeError(
             f"Квота исчерпана на всех {len(keys)} ключ(а/ей).\n\n"
-            f"Исчерпаны ключи: {', '.join(f'#{k}' for k in quota_exhausted_keys)}\n\n"
             f"Бесплатный лимит Gemini Pro: 50 запросов в день / 2 в минуту.\n"
             f"Добавь ещё ключи в Настройках или подожди до завтра.\n"
             f"Новый ключ: aistudio.google.com/app/apikey"
+        )
+    last_err_str = str(last_err).lower()
+    if "expired" in last_err_str or "invalid" in last_err_str or "leaked" in last_err_str:
+        raise RuntimeError(
+            f"Все {len(keys)} Gemini API ключ(а/ей) недействительны.\n\n"
+            f"Причина: ключи истекли, отозваны или скомпрометированы.\n\n"
+            f"Создай новые ключи на: aistudio.google.com/app/apikey\n"
+            f"Затем добавь их в Настройки → Gemini API Keys."
         )
     tried_models = list({m for k in keys for m in _discover_models(k)})
     tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
