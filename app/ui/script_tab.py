@@ -297,12 +297,24 @@ class ScriptTab(QWidget):
         self.script_edit.setText(data.get("script", ""))
         self.title_edit.setText(data.get("title", ""))
         self.desc_edit.setText(data.get("description", ""))
-        self.tags_edit.setText(", ".join(data.get("tags", [])))
+
+        # Tags: merge source-video tags (primary) + AI-generated tags
+        source_tags: list[str] = []
+        for v in self._source_videos:
+            for t in v.get("tags", []):
+                if t and t not in source_tags:
+                    source_tags.append(t)
+        ai_tags = data.get("tags", [])
+        # Add AI tags that aren't already covered by source tags
+        source_tags_lower = {t.lower() for t in source_tags}
+        for t in ai_tags:
+            if t.lower() not in source_tags_lower:
+                source_tags.append(t)
+        all_tags = source_tags[:50]
+        self.tags_edit.setText(", ".join(all_tags))
+
         for i in range(1, 4):
             getattr(self, f"prompt{i}_edit").clear()
-        self._thumb_status.setText(
-            "Script ready. Click 'Analyse thumbnails' to generate prompts."
-        )
         self._update_char_count()
 
         # Update model info label with what was actually used
@@ -317,14 +329,16 @@ class ScriptTab(QWidget):
             model_name = _gemini.GEMINI_MODELS.get(used_model, used_model)
             key_info   = f" (Key {key_num}/{key_total})" if key_total > 1 else ""
             self._status.set_ok(
-                f"Script generated via {model_name}{key_info}! "
-                "Review and click 'Analyse thumbnails'."
+                f"Сценарий готов ({model_name}{key_info}). Анализирую превью..."
             )
         else:
-            self._status.set_ok("Script generated! Review and click 'Analyse thumbnails'.")
+            self._status.set_ok("Сценарий готов. Анализирую превью источников...")
 
         # Update token counter
         self._update_token_label()
+
+        # Auto-trigger thumbnail analysis immediately after script generation
+        self._analyze_thumbnails()
 
     def _update_token_label(self):
         """Refresh the session token counter label."""
@@ -348,29 +362,38 @@ class ScriptTab(QWidget):
         # Quick key check
         if provider == "gemini":
             if not _gemini.get_active_keys(cfg):
-                self._status.set_error("Gemini API key not set. Go to Settings.")
+                self._thumb_status.setText("Нет Gemini API ключа — промты превью пропущены.")
                 return
         else:
             if not cfg.get("anthropic_api_key", "").strip():
-                self._status.set_error("Claude API key not set. Go to Settings.")
+                self._thumb_status.setText("Нет Claude API ключа — промты превью пропущены.")
                 return
         if not self._source_videos:
-            self._status.set_error("No source videos loaded.")
+            self._thumb_status.setText("Нет исходных видео для анализа превью.")
             return
 
-        thumbnail_urls = [
-            v.get("thumbnail", "") for v in self._source_videos if v.get("thumbnail")
-        ][:3]
+        # Prefer maxresdefault > hqdefault > medium thumbnail
+        thumbnail_urls = []
+        for v in self._source_videos[:3]:
+            vid_id = v.get("id", "")
+            if vid_id:
+                # Try highest quality first
+                thumbnail_urls.append(
+                    f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
+                )
+            elif v.get("thumbnail"):
+                thumbnail_urls.append(v["thumbnail"])
         if not thumbnail_urls:
-            self._status.set_error("No thumbnail URLs found in source videos.")
+            self._thumb_status.setText("Нет URL превью в исходных видео.")
             return
 
         new_title = self.title_edit.text()
         new_desc  = self.desc_edit.toPlainText()[:300]
 
         self._set_busy(True)
-        self._thumb_status.setText("Downloading thumbnails and analysing with Claude Vision...")
-        self._status.set_info("Analysing thumbnails...")
+        self._thumb_status.setText(
+            f"Скачиваю {len(thumbnail_urls)} превью и анализирую через AI..."
+        )
 
         self._thumb_worker = WorkerThread(
             self._run_thumb_analysis, cfg, thumbnail_urls, new_title, new_desc
@@ -390,20 +413,34 @@ class ScriptTab(QWidget):
     ) -> list[str]:
         pairs = []
         for url in urls:
-            try:
-                img_bytes = download_thumbnail(url)
-                pairs.append((img_bytes, ""))
-            except Exception:
-                pass
+            img_bytes = None
+            # Try maxresdefault first, fall back to hqdefault then original url
+            candidates = [url]
+            if "maxresdefault" in url:
+                vid_id = url.split("/vi/")[1].split("/")[0] if "/vi/" in url else ""
+                if vid_id:
+                    candidates = [
+                        url,
+                        f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
+                        f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
+                    ]
+            for candidate in candidates:
+                try:
+                    img_bytes = download_thumbnail(candidate)
+                    break
+                except Exception:
+                    continue
+            if img_bytes:
+                pairs.append((img_bytes, "image/jpeg"))
         return _api_analyze_thumbnails(cfg, pairs, new_title, new_desc)
 
     def _on_thumbs_done(self, prompts: list[str]):
         for i, prompt in enumerate(prompts[:3], 1):
             getattr(self, f"prompt{i}_edit").setText(prompt)
         self._thumb_status.setText(
-            f"{len(prompts)} thumbnail prompt(s) generated from competitor analysis."
+            f"Готово: {len(prompts)} промта для генерации превью на основе анализа конкурентов."
         )
-        self._status.set_ok("Thumbnail prompts ready!")
+        self._status.set_ok("Сценарий и промты превью готовы! Нажми 'Подтвердить →'")
 
     def _update_char_count(self):
         text   = self.script_edit.toPlainText()
