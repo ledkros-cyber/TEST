@@ -418,13 +418,17 @@ def _call_with_cascade(fn, cfg: dict, *args,
     keys = get_active_keys(cfg)
     if not keys:
         raise RuntimeError(
-            "Gemini API key is not set.\n"
-            "Go to Settings tab → Gemini API Keys → add your key.\n"
-            "Free key: aistudio.google.com/app/apikey"
+            "Gemini API key не задан.\n"
+            "Перейди в Настройки → Gemini API Keys → добавь ключ.\n"
+            "Бесплатный ключ: aistudio.google.com/app/apikey"
         )
 
     start_key = cfg.get("gemini_key_index", 0) % len(keys)
     last_err = None
+    quota_exhausted_keys: list[int] = []   # key indices that hit quota
+
+    if log:
+        log.info(f"Gemini start: {len(keys)} key(s) available, starting from key #{start_key + 1}")
 
     # Try each key; for each key discover its available models and cascade through them
     for ki in range(len(keys)):
@@ -485,19 +489,42 @@ def _call_with_cascade(fn, cfg: dict, *args,
                         cached.remove(model)
                     continue
                 elif _is_quota_error(e):
-                    # Quota exhausted for this key — move to next key
+                    # Quota exhausted for this key — switch to next key
+                    quota_exhausted_keys.append(key_idx + 1)
+                    next_key_num = ((key_idx + 1) % len(keys)) + 1
+                    if log:
+                        remaining = len(keys) - len(quota_exhausted_keys)
+                        if remaining > 0:
+                            log.info(
+                                f"Ключ #{key_idx + 1} — квота исчерпана. "
+                                f"Переключаюсь на ключ #{next_key_num} "
+                                f"(осталось ключей: {remaining})"
+                            )
+                        else:
+                            log.info(
+                                f"Ключ #{key_idx + 1} — квота исчерпана. "
+                                f"Все {len(keys)} ключ(а/ей) исчерпаны."
+                            )
                     break
                 else:
                     raise  # auth / network errors — propagate immediately
 
+    # Build a clear final error message
+    if quota_exhausted_keys and len(quota_exhausted_keys) == len(keys):
+        raise RuntimeError(
+            f"Квота исчерпана на всех {len(keys)} ключ(а/ей).\n\n"
+            f"Исчерпаны ключи: {', '.join(f'#{k}' for k in quota_exhausted_keys)}\n\n"
+            f"Бесплатный лимит Gemini Pro: 50 запросов в день / 2 в минуту.\n"
+            f"Добавь ещё ключи в Настройках или подожди до завтра.\n"
+            f"Новый ключ: aistudio.google.com/app/apikey"
+        )
     tried_models = list({m for k in keys for m in _discover_models(k)})
     tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
     raise RuntimeError(
-        f"All Gemini models/keys exhausted.\n"
-        f"Models tried: {tried_str}\n"
-        f"Keys tried: {len(keys)}\n"
-        f"Last error: {last_err}\n\n"
-        f"Check your key at aistudio.google.com/app/apikey"
+        f"Не удалось получить ответ от Gemini.\n"
+        f"Проверено ключей: {len(keys)}, моделей: {tried_str}\n"
+        f"Последняя ошибка: {last_err}\n\n"
+        f"Проверь ключи на aistudio.google.com/app/apikey"
     )
 
 
