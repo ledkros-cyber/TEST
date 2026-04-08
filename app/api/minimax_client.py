@@ -10,14 +10,30 @@ Endpoints:
 Authentication: Authorization: Bearer {API_KEY}
 Modern JWT keys (~126 chars) embed the GroupId — no URL param needed.
 Legacy keys require ?GroupId= query param (19-digit account number).
+
+Text limit: MiniMax T2A V2 accepts max ~4500 chars per request.
+Long texts are automatically split at sentence boundaries and audio chunks
+are concatenated into a single MP3 output file.
 """
 import os
+import re
+import subprocess
+import sys
+import tempfile
 import requests
 
 try:
     from app.utils.logger import log
 except Exception:
     log = None
+
+# Windows: suppress console popups
+_POPEN_FLAGS: dict = {}
+if sys.platform == "win32":
+    _POPEN_FLAGS["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+# Max characters per single TTS request (MiniMax T2A V2 limit)
+_MAX_CHARS = 4500
 
 # ── Official endpoints ────────────────────────────────────────────────────────
 _EP_GLOBAL  = "https://api.minimax.io/v1/t2a_v2"
@@ -69,6 +85,82 @@ VOICES = {
 }
 
 
+def _split_text(text: str, max_chars: int = _MAX_CHARS) -> list[str]:
+    """Split text into chunks of at most max_chars at sentence boundaries."""
+    if len(text) <= max_chars:
+        return [text]
+
+    # Split at sentence endings
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        # If single sentence is too long, split at commas/semicolons
+        if len(sentence) > max_chars:
+            parts = re.split(r'(?<=[,;])\s+', sentence)
+            for part in parts:
+                if len(current) + len(part) + 1 <= max_chars:
+                    current = (current + " " + part).strip()
+                else:
+                    if current:
+                        chunks.append(current)
+                    # If even a single part is too long, hard-cut at max_chars
+                    while len(part) > max_chars:
+                        chunks.append(part[:max_chars])
+                        part = part[max_chars:]
+                    current = part
+        elif len(current) + len(sentence) + 1 <= max_chars:
+            current = (current + " " + sentence).strip()
+        else:
+            if current:
+                chunks.append(current)
+            current = sentence
+
+    if current:
+        chunks.append(current)
+
+    return [c for c in chunks if c.strip()]
+
+
+def _concat_mp3_chunks(chunk_paths: list[str], output_path: str) -> str:
+    """Concatenate multiple MP3 files into one using FFmpeg concat demuxer."""
+    # Find ffmpeg — try local bin first, then PATH
+    ffmpeg = "ffmpeg"
+    local = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "bin", "ffmpeg.exe")
+    if os.path.exists(local):
+        ffmpeg = local
+
+    # Write concat list file
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        for p in chunk_paths:
+            safe = p.replace("'", "\\'")
+            f.write(f"file '{safe}'\n")
+        list_path = f.name
+
+    try:
+        cmd = [
+            ffmpeg, "-y", "-hide_banner",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, **_POPEN_FLAGS,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg concat failed: {result.stderr[-500:]}")
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+
+    return output_path
+
+
 def _build_endpoints(group_id: str) -> list[tuple[str, str]]:
     """
     Return list of (url, label) to try, most-likely-to-work first.
@@ -104,16 +196,78 @@ def generate_audio(
 ) -> str:
     """
     Send text to MiniMax T2A V2 API and save result as MP3.
+    Automatically splits long texts into chunks and concatenates the audio.
+    MiniMax T2A V2 limit: ~4500 chars per request.
     Returns the path to the saved audio file.
     """
     api_key  = (api_key  or "").strip()
     group_id = (group_id or "").strip()
+    text     = (text     or "").strip()
 
     if not api_key:
         raise RuntimeError(
             "MiniMax API key is not set.\n"
             "Go to Settings tab and enter your MiniMax API key."
         )
+
+    if not output_path:
+        output_path = os.path.join(os.getcwd(), "output_audio.mp3")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    # ── Split long text into chunks and process each separately ──────────────
+    chunks = _split_text(text, _MAX_CHARS)
+    if len(chunks) > 1:
+        if log:
+            log.info(
+                f"MiniMax: text too long ({len(text)} chars), "
+                f"splitting into {len(chunks)} chunks"
+            )
+        chunk_paths: list[str] = []
+        try:
+            for i, chunk in enumerate(chunks):
+                tmp = tempfile.NamedTemporaryFile(suffix=f"_chunk{i}.mp3", delete=False)
+                tmp.close()
+                chunk_path = _generate_audio_single(
+                    api_key=api_key, group_id=group_id, text=chunk,
+                    voice_id=voice_id, speed=speed, volume=volume,
+                    model=model, output_path=tmp.name,
+                    language_boost=language_boost,
+                )
+                chunk_paths.append(chunk_path)
+                if log:
+                    log.info(f"MiniMax: chunk {i+1}/{len(chunks)} done ({len(chunk)} chars)")
+            _concat_mp3_chunks(chunk_paths, output_path)
+            if log:
+                log.info(f"MiniMax TTS success (chunked {len(chunks)} parts) → {output_path}")
+            return output_path
+        finally:
+            for p in chunk_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    # Single chunk — call directly
+    return _generate_audio_single(
+        api_key=api_key, group_id=group_id, text=text,
+        voice_id=voice_id, speed=speed, volume=volume,
+        model=model, output_path=output_path,
+        language_boost=language_boost,
+    )
+
+
+def _generate_audio_single(
+    api_key: str,
+    group_id: str,
+    text: str,
+    voice_id: str = "Deep_Voice_Man",
+    speed: float = 1.0,
+    volume: float = 1.0,
+    model: str = DEFAULT_MODEL,
+    output_path: str = "",
+    language_boost: str = "auto",
+) -> str:
+    """Send a single text chunk (≤4500 chars) to MiniMax and save as MP3."""
 
     key_hint = f"...{api_key[-6:]}" if len(api_key) > 6 else "(short key?)"
 
@@ -227,8 +381,6 @@ def generate_audio(
                 log.api("MiniMax", label, error=f"Bad audio hex: {e}")
             continue
 
-        if not output_path:
-            output_path = os.path.join(os.getcwd(), "output_audio.mp3")
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, "wb") as f:
             f.write(audio_bytes)
