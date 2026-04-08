@@ -5,7 +5,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSplitter, QTextEdit, QGroupBox, QScrollArea, QMessageBox,
+    QSplitter, QTextEdit, QTextBrowser, QGroupBox, QScrollArea, QMessageBox,
     QSizePolicy,
 )
 
@@ -102,9 +102,13 @@ class HistoryTab(QWidget):
         dc_layout.addWidget(self._detail_script)
 
         dc_layout.addWidget(QLabel("Источники:"))
-        self._detail_sources = QLabel("")
-        self._detail_sources.setWordWrap(True)
-        self._detail_sources.setStyleSheet("color:#9090aa; font-size:11px;")
+        self._detail_sources = QTextBrowser()
+        self._detail_sources.setFixedHeight(90)
+        self._detail_sources.setOpenExternalLinks(True)
+        self._detail_sources.setStyleSheet("font-size:11px; background:#1a1a2e; border:1px solid #3a3b55;")
+        self._detail_sources.anchorClicked.connect(
+            lambda url: QDesktopServices.openUrl(url)
+        )
         dc_layout.addWidget(self._detail_sources)
 
         dc_layout.addStretch()
@@ -212,7 +216,14 @@ class HistoryTab(QWidget):
         self._detail_script.setText(p.get("script", ""))
 
         sources = p.get("source_urls", [])
-        self._detail_sources.setText("\n".join(sources) if sources else "—")
+        if sources:
+            links_html = "<br>".join(
+                f'<a href="{url}" style="color:#6c9be8;">{url}</a>'
+                for url in sources
+            )
+            self._detail_sources.setHtml(links_html)
+        else:
+            self._detail_sources.setPlainText("—")
 
     def _delete_selected(self):
         row = self.table.currentRow()
