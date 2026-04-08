@@ -244,7 +244,7 @@ class ScriptTab(QWidget):
                 )
             else:
                 preferred = _gemini.GEMINI_MODELS.get(cfg.get("gemini_model", ""), cfg.get("gemini_model", ""))
-                cascade_hint = f" (+{len(_gemini.GEMINI_MODEL_CASCADE)-1} fallback models)" if len(_gemini.GEMINI_MODEL_CASCADE) > 1 else ""
+                cascade_hint = f" (+{len(_gemini._FALLBACK_CASCADE)-1} fallback models)" if len(_gemini._FALLBACK_CASCADE) > 1 else ""
                 key_hint = f", {n_keys} key(s)" if n_keys else ", no key!"
                 self._model_label.setText(
                     f"AI: Gemini — {preferred}{cascade_hint}{key_hint}"
