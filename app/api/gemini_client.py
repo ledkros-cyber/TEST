@@ -316,30 +316,48 @@ def _generate_with_sdk(
         # Map SDK errors to messages our cascade understands
         e_str = str(exc)
         code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        e_lower = e_str.lower()
 
-        if code == 404 or "404" in e_str or "not found" in e_str.lower():
+        # 1. Model not found / not available (404 / NOT_FOUND)
+        if code == 404 or "404" in e_str or "not found" in e_lower or "not_found" in e_lower:
             raise RuntimeError(
                 f"404 model not found: {model_id} — {e_str[:200]}"
             )
+
+        # 2. Quota / rate limit (429 / RESOURCE_EXHAUSTED)
         if (
             code == 429
             or "429" in e_str
-            or "quota" in e_str.lower()
-            or "resource_exhausted" in e_str.lower()
+            or "quota" in e_lower
+            or "resource_exhausted" in e_lower
         ):
             raise RuntimeError(
                 f"Gemini quota exceeded (429) for model {model_id}.\n\n"
                 f"Бесплатный лимит Gemini Pro: 50 запросов в день / 2 в минуту.\n"
                 f"Подождите минуту или добавьте другой API-ключ в Настройках."
             )
+
+        # 3. Model access denied (403 / PERMISSION_DENIED)
+        #    This means the MODEL needs billing or a different plan — not a bad key.
+        #    Must check BEFORE the key-invalid block (both can be HTTP 403).
+        if code == 403 or "permission_denied" in e_lower:
+            raise RuntimeError(
+                f"Gemini model access denied (403): {model_id} — {e_str[:200]}"
+            )
+
+        # 4. Invalid / revoked / expired API key (401 UNAUTHENTICATED / 400 API_KEY_INVALID)
+        #    Only trigger on clear key-related messages to avoid false positives.
         if (
-            code in (401, 403)
-            or "api key" in e_str.lower()
-            or "invalid" in e_str.lower()
+            code == 401
+            or "unauthenticated" in e_lower
+            or "api_key_invalid" in e_lower
+            or "api key not valid" in e_lower
+            or ("api key" in e_lower and ("invalid" in e_lower or "expired" in e_lower or "leaked" in e_lower))
         ):
             raise RuntimeError(
-                f"Gemini API key rejected (HTTP {code}): {e_str[:200]}"
+                f"Gemini API key invalid (HTTP {code}): {e_str[:200]}"
             )
+
         raise RuntimeError(f"Gemini SDK error: {e_str[:300]}")
 
     # Track token usage from usageMetadata
@@ -395,22 +413,26 @@ def _is_key_invalid_error(e: Exception) -> bool:
     """Return True if the key itself is invalid/expired/revoked — try next key."""
     msg = str(e).lower()
     return (
-        "expired" in msg
-        or "leaked" in msg
+        "unauthenticated" in msg
         or "api_key_invalid" in msg
-        or "key rejected" in msg
-        or ("400" in msg and ("invalid" in msg or "expired" in msg))
-        or ("403" in msg and "key" in msg)
-        or "permission_denied" in msg
+        or "api key not valid" in msg
+        or "key invalid" in msg          # from our wrapped "API key invalid" message
+        or "key rejected" in msg         # legacy — keep for safety
+        or ("api key" in msg and ("invalid" in msg or "expired" in msg or "leaked" in msg))
     )
 
 
 def _is_model_error(e: Exception) -> bool:
-    """Return True if the exception indicates the model is unavailable / not found."""
+    """Return True if the exception indicates the model is unavailable / not found.
+    Includes 403 PERMISSION_DENIED — means this model needs billing/different plan,
+    not that the key itself is bad.
+    """
     msg = str(e).lower()
     return (
         "404" in msg or "not_found" in msg or "not found" in msg
         or "not supported" in msg or "deprecated" in msg
+        or "model access denied" in msg  # 403 PERMISSION_DENIED for model billing
+        or "permission_denied" in msg    # 403 in general = model/plan restriction
         or ("invalid" in msg and "model" in msg)
     )
 
@@ -444,24 +466,34 @@ def _call_with_cascade(fn, cfg: dict, *args,
     if log:
         log.info(f"Gemini start: {len(keys)} key(s) available, starting from key #{start_key + 1}")
 
+    # Flash models used as last-resort fallback when all pro models are access-denied
+    _FLASH_FALLBACK = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+
     # Try each key; for each key discover its available models and cascade through them
     for ki in range(len(keys)):
         key_idx = (start_key + ki) % len(keys)
         key = keys[key_idx]
 
-        # Discover models available for this specific key
+        # Discover models available for this specific key (pro models first)
         models_for_key = _discover_models(key)
+
+        # Always append flash models as last-resort fallback (deduplicated)
+        # This ensures flash models are tried if all pro models return permission_denied
+        all_models_for_key: list[str] = list(models_for_key)
+        for fm in _FLASH_FALLBACK:
+            if fm not in all_models_for_key:
+                all_models_for_key.append(fm)
 
         # If the caller specified a preferred model and it's available, start from it;
         # otherwise start from the beginning (most capable)
-        if model_id in models_for_key:
-            start_model_idx = models_for_key.index(model_id)
+        if model_id in all_models_for_key:
+            start_model_idx = all_models_for_key.index(model_id)
         else:
             start_model_idx = 0
 
-        models_to_try = models_for_key[start_model_idx:]
+        models_to_try = all_models_for_key[start_model_idx:]
         if not models_to_try:
-            models_to_try = models_for_key  # safety fallback
+            models_to_try = all_models_for_key  # safety fallback
 
         for model in models_to_try:
             if log:
@@ -540,12 +572,22 @@ def _call_with_cascade(fn, cfg: dict, *args,
             f"Новый ключ: aistudio.google.com/app/apikey"
         )
     last_err_str = str(last_err).lower()
-    if "expired" in last_err_str or "invalid" in last_err_str or "leaked" in last_err_str:
+    if "key invalid" in last_err_str or "api_key_invalid" in last_err_str or "unauthenticated" in last_err_str:
         raise RuntimeError(
             f"Все {len(keys)} Gemini API ключ(а/ей) недействительны.\n\n"
             f"Причина: ключи истекли, отозваны или скомпрометированы.\n\n"
             f"Создай новые ключи на: aistudio.google.com/app/apikey\n"
             f"Затем добавь их в Настройки → Gemini API Keys."
+        )
+    if "permission_denied" in last_err_str or "model access denied" in last_err_str:
+        raise RuntimeError(
+            f"Нет доступа ни к одной модели Gemini.\n\n"
+            f"Причина: все Pro-модели требуют платного тарифа Google AI.\n\n"
+            f"Решение:\n"
+            f"  1. Открой aistudio.google.com/app/apikey\n"
+            f"  2. Попробуй модель gemini-2.0-flash или gemini-1.5-flash (они работают бесплатно)\n"
+            f"  3. Выбери flash-модель в Настройках → Gemini Model\n"
+            f"  4. Или включи billing в Google Cloud для Pro-моделей"
         )
     tried_models = list({m for k in keys for m in _discover_models(k)})
     tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
