@@ -77,10 +77,10 @@ class VideoTab(QWidget):
         outer.addWidget(src_group)
 
         # Output
-        out_group = QGroupBox("Выходное видео")
+        out_group = QGroupBox("Папка для сохранения видео")
         out_layout = QHBoxLayout(out_group)
         self.output_path = QLineEdit()
-        self.output_path.setPlaceholderText("Путь для сохранения готового видео...")
+        self.output_path.setPlaceholderText("Папка для сохранения (файлы: film_01.mp4, film_02.mp4 ...)")
         out_layout.addWidget(self.output_path)
         out_browse = QPushButton("Обзор")
         out_browse.setObjectName("secondary")
@@ -325,16 +325,10 @@ class VideoTab(QWidget):
 
     def _browse_output(self):
         cfg = load_config()
-        default_dir = cfg.get("output_folder", "") or os.path.expanduser("~")
-        num = database.next_project_number()
-        default_name = f"video_{num:04d}.mp4"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить видео",
-            os.path.join(default_dir, default_name),
-            "MP4 файлы (*.mp4)"
-        )
-        if path:
-            self.output_path.setText(path)
+        default_dir = cfg.get("output_folder", "") or self.output_path.text().strip() or os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения видео", default_dir)
+        if folder:
+            self.output_path.setText(folder)
 
     def _get_quality(self) -> str:
         return "1080p" if "1080" in self.quality_combo.currentText() else "720p"
@@ -352,6 +346,12 @@ class VideoTab(QWidget):
         cfg["clip_max_dur"]      = self.clip_max_spin.value()
         cfg["extra_seconds"]     = self.extra_spin.value()
         cfg["source_videos_folder"] = self.source_folder.text().strip()
+        # Save output folder (not filename — it's auto-generated each render)
+        out_val = self.output_path.text().strip()
+        if out_val and os.path.isdir(out_val):
+            cfg["output_folder"] = out_val
+        elif out_val and os.path.isdir(os.path.dirname(out_val)):
+            cfg["output_folder"] = os.path.dirname(out_val)
         cfg["bg_music_path"]     = self.bg_music_path.text().strip()
         cfg["bg_music_volume"]   = self.bg_vol_slider.value() / 100.0
         cfg["use_infographics"]  = self.infographics_check.isChecked()
@@ -368,12 +368,23 @@ class VideoTab(QWidget):
         if not audio:
             self._status.set_error("Аудиодорожка не задана. Создайте озвучку на вкладке «Озвучка».")
             return
-        if not out:
+        # out can be a folder or a file path — always auto-name to avoid overwriting
+        out_dir = out if out and os.path.isdir(out) else (
+            os.path.dirname(out) if out else ""
+        )
+        if not out_dir:
             cfg = load_config()
-            default_dir = cfg.get("output_folder", "") or os.path.expanduser("~")
-            num = database.next_project_number()
-            out = os.path.join(default_dir, f"video_{num:04d}.mp4")
-            self.output_path.setText(out)
+            out_dir = cfg.get("output_folder", "") or os.path.expanduser("~")
+            self.output_path.setText(out_dir)
+
+        # Generate next free filename: film_01.mp4, film_02.mp4 ...
+        n = 1
+        while True:
+            candidate = os.path.join(out_dir, f"film_{n:02d}.mp4")
+            if not os.path.exists(candidate):
+                break
+            n += 1
+        out = candidate
 
         cfg_vid = VideoConfig(
             source_folder=src,
