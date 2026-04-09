@@ -421,15 +421,17 @@ def _is_quota_error(e: Exception) -> bool:
 
 
 def _is_key_invalid_error(e: Exception) -> bool:
-    """Return True if the key itself is invalid/expired/revoked — try next key."""
+    """Return True if the key itself is invalid/expired/revoked/leaked — try next key."""
     msg = str(e).lower()
     return (
         "unauthenticated" in msg
         or "api_key_invalid" in msg
         or "api key not valid" in msg
-        or "key invalid" in msg          # from our wrapped "API key invalid" message
-        or "key rejected" in msg         # legacy — keep for safety
-        or ("api key" in msg and ("invalid" in msg or "expired" in msg or "leaked" in msg))
+        or "key invalid" in msg
+        or "key rejected" in msg
+        or "reported as leaked" in msg   # Google's exact message for leaked keys
+        or "key was reported" in msg
+        or ("api key" in msg and ("leaked" in msg or "invalid" in msg or "expired" in msg))
     )
 
 
@@ -551,7 +553,15 @@ def _call_with_cascade(fn, cfg: dict, *args,
                         f"{model} (key #{key_idx + 1})",
                         error=str(e)[:200],
                     )
-                if _is_model_error(e):
+                if _is_key_invalid_error(e):
+                    # Key is expired/revoked/leaked — skip ALL models, go to next key
+                    if log:
+                        log.info(
+                            f"Ключ #{key_idx + 1} — недействителен (истёк/отозван/leaked). "
+                            f"Переключаюсь на следующий ключ."
+                        )
+                    break
+                elif _is_model_error(e):
                     # Model unavailable (404, 403, 503 overload) — evict and try next
                     ck = _cache_key(key)
                     cached = _discovered_models_cache.get(ck, [])
@@ -575,14 +585,6 @@ def _call_with_cascade(fn, cfg: dict, *args,
                                 f"Ключ #{key_idx + 1} — квота исчерпана. "
                                 f"Все {len(keys)} ключ(а/ей) исчерпаны."
                             )
-                    break
-                elif _is_key_invalid_error(e):
-                    # Key is expired/revoked/leaked — skip to next key
-                    if log:
-                        log.info(
-                            f"Ключ #{key_idx + 1} — недействителен (истёк/отозван). "
-                            f"Переключаюсь на следующий ключ."
-                        )
                     break
                 else:
                     raise  # network errors — propagate immediately
