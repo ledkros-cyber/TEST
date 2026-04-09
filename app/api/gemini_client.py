@@ -69,14 +69,13 @@ _MODEL_PREFERENCE = [
 ]
 
 # Fallback cascade — used ONLY when model discovery itself fails (auth/network error)
-# Pro/thinking models first, flash as last resort
+# Updated 2025-04: gemini-2.0-flash, gemini-1.5-* are no longer available (404)
+# Only gemini-2.5-pro and gemini-2.5-flash are confirmed working
 _FALLBACK_CASCADE = [
     "gemini-2.5-pro",
-    "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",     # may be available as lightweight option
+    "gemini-2.0-flash-exp",      # experimental, sometimes available
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +336,18 @@ def _generate_with_sdk(
                 f"Подождите минуту или добавьте другой API-ключ в Настройках."
             )
 
+        # 2b. Server overload (503 / UNAVAILABLE) — temporary, try next model
+        if (
+            code == 503
+            or "503" in e_str
+            or "unavailable" in e_lower
+            or "high demand" in e_lower
+            or "overloaded" in e_lower
+        ):
+            raise RuntimeError(
+                f"Gemini 503 overloaded: {model_id} — {e_str[:150]}"
+            )
+
         # 3. Model access denied (403 / PERMISSION_DENIED)
         #    This means the MODEL needs billing or a different plan — not a bad key.
         #    Must check BEFORE the key-invalid block (both can be HTTP 403).
@@ -422,10 +433,19 @@ def _is_key_invalid_error(e: Exception) -> bool:
     )
 
 
+def _is_503_error(e: Exception) -> bool:
+    """Return True if the exception is a temporary server overload (503)."""
+    msg = str(e).lower()
+    return (
+        "503 overloaded" in msg
+        or "high demand" in msg
+        or ("503" in msg and ("unavailable" in msg or "overloaded" in msg))
+    )
+
+
 def _is_model_error(e: Exception) -> bool:
     """Return True if the exception indicates the model is unavailable / not found.
-    Includes 403 PERMISSION_DENIED — means this model needs billing/different plan,
-    not that the key itself is bad.
+    Includes 403 PERMISSION_DENIED and 503 overload — both mean 'try next model'.
     """
     msg = str(e).lower()
     return (
@@ -433,6 +453,8 @@ def _is_model_error(e: Exception) -> bool:
         or "not supported" in msg or "deprecated" in msg
         or "model access denied" in msg  # 403 PERMISSION_DENIED for model billing
         or "permission_denied" in msg    # 403 in general = model/plan restriction
+        or "503 overloaded" in msg       # temporary server overload — try next model
+        or "high demand" in msg          # 503 high demand variant
         or ("invalid" in msg and "model" in msg)
     )
 
@@ -460,14 +482,15 @@ def _call_with_cascade(fn, cfg: dict, *args,
         )
 
     start_key = cfg.get("gemini_key_index", 0) % len(keys)
-    last_err = None
-    quota_exhausted_keys: list[int] = []   # key indices that hit quota
+    last_err: Exception | None = None
+    quota_exhausted_keys: list[int] = []
+    all_errors: list[Exception] = []       # track all errors to detect all-503 scenario
 
     if log:
         log.info(f"Gemini start: {len(keys)} key(s) available, starting from key #{start_key + 1}")
 
-    # Flash models used as last-resort fallback when all pro models are access-denied
-    _FLASH_FALLBACK = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    # Flash models — last-resort fallback when all pro models fail (confirmed working 2025-04)
+    _FLASH_FALLBACK = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp"]
 
     # Try each key; for each key discover its available models and cascade through them
     for ki in range(len(keys)):
@@ -521,6 +544,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
                 return result
             except Exception as e:
                 last_err = e
+                all_errors.append(e)
                 if log:
                     log.api(
                         "Gemini",
@@ -528,7 +552,7 @@ def _call_with_cascade(fn, cfg: dict, *args,
                         error=str(e)[:200],
                     )
                 if _is_model_error(e):
-                    # This model doesn't work — evict from cache and try the next one
+                    # Model unavailable (404, 403, 503 overload) — evict and try next
                     ck = _cache_key(key)
                     cached = _discovered_models_cache.get(ck, [])
                     if model in cached:
@@ -563,17 +587,31 @@ def _call_with_cascade(fn, cfg: dict, *args,
                 else:
                     raise  # network errors — propagate immediately
 
-    # Build a clear final error message
+    # ── Build a clear final error message ─────────────────────────────────────
     if quota_exhausted_keys and len(quota_exhausted_keys) == len(keys):
         raise RuntimeError(
+            f"GEMINI_ALL_FAILED:quota\n"
             f"Квота исчерпана на всех {len(keys)} ключ(а/ей).\n\n"
             f"Бесплатный лимит Gemini Pro: 50 запросов в день / 2 в минуту.\n"
             f"Добавь ещё ключи в Настройках или подожди до завтра.\n"
             f"Новый ключ: aistudio.google.com/app/apikey"
         )
-    last_err_str = str(last_err).lower()
+
+    # All-503: every attempt hit "high demand" — signal caller to try fallback API
+    if all_errors and all(_is_503_error(e) or _is_model_error(e) for e in all_errors):
+        if all(_is_503_error(e) for e in all_errors):
+            raise RuntimeError(
+                f"GEMINI_ALL_FAILED:overloaded\n"
+                f"Все модели Gemini временно перегружены (503).\n\n"
+                f"Google испытывает высокую нагрузку. Это временно.\n"
+                f"Подождите 1-2 минуты и попробуйте снова.\n"
+                f"Или переключитесь на Claude в Настройках."
+            )
+
+    last_err_str = str(last_err).lower() if last_err else ""
     if "key invalid" in last_err_str or "api_key_invalid" in last_err_str or "unauthenticated" in last_err_str:
         raise RuntimeError(
+            f"GEMINI_ALL_FAILED:invalid_key\n"
             f"Все {len(keys)} Gemini API ключ(а/ей) недействительны.\n\n"
             f"Причина: ключи истекли, отозваны или скомпрометированы.\n\n"
             f"Создай новые ключи на: aistudio.google.com/app/apikey\n"
@@ -581,17 +619,15 @@ def _call_with_cascade(fn, cfg: dict, *args,
         )
     if "permission_denied" in last_err_str or "model access denied" in last_err_str:
         raise RuntimeError(
+            f"GEMINI_ALL_FAILED:no_access\n"
             f"Нет доступа ни к одной модели Gemini.\n\n"
-            f"Причина: все Pro-модели требуют платного тарифа Google AI.\n\n"
-            f"Решение:\n"
-            f"  1. Открой aistudio.google.com/app/apikey\n"
-            f"  2. Попробуй модель gemini-2.0-flash или gemini-1.5-flash (они работают бесплатно)\n"
-            f"  3. Выбери flash-модель в Настройках → Gemini Model\n"
-            f"  4. Или включи billing в Google Cloud для Pro-моделей"
+            f"Все Pro-модели требуют платного тарифа Google AI.\n"
+            f"Решение: в Настройках выбери flash-модель (бесплатная)."
         )
     tried_models = list({m for k in keys for m in _discover_models(k)})
     tried_str = ", ".join(tried_models[:5]) + ("..." if len(tried_models) > 5 else "")
     raise RuntimeError(
+        f"GEMINI_ALL_FAILED:unknown\n"
         f"Не удалось получить ответ от Gemini.\n"
         f"Проверено ключей: {len(keys)}, моделей: {tried_str}\n"
         f"Последняя ошибка: {last_err}\n\n"

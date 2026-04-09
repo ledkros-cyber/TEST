@@ -6,8 +6,8 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 DEFAULTS = {
     "youtube_api_key": "AIzaSyB-3w_DiRP02WuLCbWSkk3yZjcR8vswe7o",
     "anthropic_api_key": "",
-    "gemini_api_key": "AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38",
-    "gemini_api_keys": ["AIzaSyAWu8Zr-rpUQseK0nGRZIxM2MzCKohCD38"],
+    "gemini_api_key": "AIzaSyD2TxtDZmpxfiU_l-mAtbK02tlHY2rm0mk",
+    "gemini_api_keys": ["AIzaSyD2TxtDZmpxfiU_l-mAtbK02tlHY2rm0mk"],
     "gemini_key_index": 0,            # current active key index
     "gemini_model": "gemini-2.5-pro",
     "ai_provider": "gemini",

@@ -15,40 +15,64 @@ from app.ui.widgets import WorkerThread, WheelSpinBox, SectionHeader, StatusBar
 
 
 def _api_generate(cfg, source_videos, master, target):
-    """Route generate_script to Claude or Gemini based on config."""
-    provider = cfg.get("ai_provider", "claude")
+    """Route generate_script to Gemini (primary) or Claude (fallback/primary)."""
+    provider = cfg.get("ai_provider", "gemini")
+
     if provider == "gemini":
         keys = _gemini.get_active_keys(cfg)
         if not keys:
             raise RuntimeError(
-                "Gemini API key is not set.\n"
-                "Go to Settings tab and enter your Google Gemini API key.\n"
-                "Get a free key at: aistudio.google.com/app/apikey"
+                "Gemini API key не задан.\n"
+                "Перейди в Настройки → Gemini API Keys → добавь ключ.\n"
+                "Бесплатный ключ: aistudio.google.com/app/apikey"
             )
         model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        return _gemini.generate_script(
-            "", source_videos, master, target,
-            model_id=model_id, cfg=cfg,
-        )
-    else:
-        api_key = cfg.get("anthropic_api_key", "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "Anthropic API key is not set.\n"
-                "Go to Settings tab and enter your Claude API key."
+        try:
+            return _gemini.generate_script(
+                "", source_videos, master, target,
+                model_id=model_id, cfg=cfg,
             )
-        return _claude.generate_script(api_key, source_videos, master, target)
+        except RuntimeError as gemini_err:
+            err_str = str(gemini_err)
+            # GEMINI_ALL_FAILED prefix means all models/keys exhausted → try Claude
+            if "GEMINI_ALL_FAILED" in err_str:
+                claude_key = cfg.get("anthropic_api_key", "").strip()
+                if claude_key:
+                    result = _claude.generate_script(
+                        claude_key, source_videos, master, target
+                    )
+                    # Tag result so UI can show fallback notice
+                    result["_fallback_provider"] = "claude"
+                    result["_gemini_error_short"] = err_str.split("\n")[1][:80]
+                    return result
+            raise  # re-raise original error if no Claude fallback available
+
+    # Claude as primary provider
+    api_key = cfg.get("anthropic_api_key", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Anthropic API key не задан.\n"
+            "Перейди в Настройки и введи Claude API key."
+        )
+    return _claude.generate_script(api_key, source_videos, master, target)
 
 
 def _api_analyze_thumbnails(cfg, pairs, title, desc):
-    """Route thumbnail analysis to Claude or Gemini."""
-    provider = cfg.get("ai_provider", "claude")
+    """Route thumbnail analysis to Gemini (primary) or Claude (fallback)."""
+    provider = cfg.get("ai_provider", "gemini")
     if provider == "gemini":
         model_id = cfg.get("gemini_model", _gemini.DEFAULT_GEMINI_MODEL)
-        return _gemini.analyze_thumbnails(
-            "", pairs, title, desc,
-            model_id=model_id, cfg=cfg,
-        )
+        try:
+            return _gemini.analyze_thumbnails(
+                "", pairs, title, desc,
+                model_id=model_id, cfg=cfg,
+            )
+        except RuntimeError as gemini_err:
+            if "GEMINI_ALL_FAILED" in str(gemini_err):
+                claude_key = cfg.get("anthropic_api_key", "").strip()
+                if claude_key:
+                    return _claude.analyze_thumbnails(claude_key, pairs, title, desc)
+            raise
     else:
         api_key = cfg.get("anthropic_api_key", "").strip()
         return _claude.analyze_thumbnails(api_key, pairs, title, desc)
@@ -324,8 +348,15 @@ class ScriptTab(QWidget):
         key_total   = cfg.get("_last_gemini_key_total", 1)
         self._update_model_label(used_model, key_num, key_total)
 
-        provider = cfg.get("ai_provider", "claude")
-        if provider == "gemini" and used_model:
+        provider = cfg.get("ai_provider", "gemini")
+        fallback = data.get("_fallback_provider", "")
+        if fallback == "claude":
+            gemini_err_short = data.get("_gemini_error_short", "недоступен")
+            self._status.set_info(
+                f"Сценарий готов через Claude (Gemini: {gemini_err_short}). "
+                f"Анализирую превью..."
+            )
+        elif provider == "gemini" and used_model:
             model_name = _gemini.GEMINI_MODELS.get(used_model, used_model)
             key_info   = f" (Key {key_num}/{key_total})" if key_total > 1 else ""
             self._status.set_ok(
