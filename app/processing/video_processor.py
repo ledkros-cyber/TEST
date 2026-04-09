@@ -412,6 +412,9 @@ def _final_render_gpu(
     else:
         cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
 
+    # Hard-cap output to total_duration so video never runs past audio end
+    if total_duration > 0:
+        cmd += ["-t", str(round(total_duration, 3))]
     cmd += [
         "-c:v", "h264_nvenc",
         "-preset", "p3",
@@ -470,6 +473,9 @@ def _final_render_cpu(
     else:
         cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
 
+    # Hard-cap output to total_duration so video never runs past audio end
+    if total_duration > 0:
+        cmd += ["-t", str(round(total_duration, 3))]
     cmd += [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-tune", "fastdecode",
@@ -513,6 +519,9 @@ def _final_render_cpu_no_subs(
         cmd += ["-filter_complex", fc, "-map", "0:v", "-map", "[aout]"]
     else:
         cmd += ["-map", "0:v", "-map", "1:a", "-af", f"volume={voice_volume:.4f}"]
+    # Hard-cap output to total_duration so video never runs past audio end
+    if total_duration > 0:
+        cmd += ["-t", str(round(total_duration, 3))]
     cmd += [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-threads", str(cpu_cores),

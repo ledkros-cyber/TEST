@@ -42,7 +42,7 @@ DEFAULTS = {
     "parallel_workers": 2,             # i5-10300H + low free RAM: 2 is safer than 3
     "clip_min_dur": 3.0,
     "clip_max_dur": 5.0,
-    "extra_seconds": 10.0,
+    "extra_seconds": 6.0,
     "voice_volume": 1.0,
     "bg_audio_volume": 0.05,
     "voice_vol_percent": 100,
