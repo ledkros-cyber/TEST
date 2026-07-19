@@ -36,12 +36,8 @@ except Exception:
 # (they may still be used as fallback in the cascade if pro models hit quota)
 GEMINI_MODELS = {
     "gemini-2.5-pro":                  "Gemini 2.5 Pro — Флагман (лучшее качество)",
-    "gemini-2.5-pro-preview-03-25":    "Gemini 2.5 Pro Preview",
-    "gemini-2.5-flash":                "Gemini 2.5 Flash",
+    "gemini-2.5-flash":                "Gemini 2.5 Flash — Быстрый (бесплатный)",
     "gemini-2.5-flash-preview-04-17":  "Gemini 2.5 Flash Preview",
-    "gemini-2.0-flash":                "Gemini 2.0 Flash",
-    "gemini-1.5-pro":                  "Gemini 1.5 Pro — Большой контекст",
-    "gemini-1.5-flash":                "Gemini 1.5 Flash",
 }
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"  # best available pro model
@@ -59,23 +55,14 @@ _MODEL_PREFERENCE = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-preview-04-17",
     "gemini-2.5-flash-preview",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-001",
-    "gemini-1.5-pro",
-    "gemini-1.5-pro-001",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-001",
-    "gemini-1.5-flash-8b",
 ]
 
 # Fallback cascade — used ONLY when model discovery itself fails (auth/network error)
-# Updated 2025-04: gemini-2.0-flash, gemini-1.5-* are no longer available (404)
-# Only gemini-2.5-pro and gemini-2.5-flash are confirmed working
+# Updated 2025-04: only gemini-2.5-pro and gemini-2.5-flash are confirmed working
+# gemini-2.0-flash-lite, gemini-2.0-flash-exp are DEAD (404)
 _FALLBACK_CASCADE = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
-    "gemini-2.0-flash-lite",     # may be available as lightweight option
-    "gemini-2.0-flash-exp",      # experimental, sometimes available
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,13 +165,14 @@ def _discover_models(api_key: str) -> list[str]:
             if any(kw in mid_lower for kw in skip_keywords):
                 continue
 
-            # STRICT: only Pro models allowed — flash and lite are too weak for scripts
-            banned_keywords = ("flash", "lite")
-            if any(kw in mid_lower for kw in banned_keywords):
+            # Only include pro and flash models (the ones good enough for scripts)
+            if "pro" not in mid_lower and "flash" not in mid_lower:
                 continue
 
-            # Must contain "pro" to be a quality model
-            if "pro" not in mid_lower:
+            # Skip known dead models
+            dead_models = ("gemini-2.0-flash-lite", "gemini-2.0-flash-exp",
+                           "gemini-2.0-flash", "gemini-1.5-")
+            if any(dead in mid_lower for dead in dead_models):
                 continue
 
             available.append(model_id)
@@ -491,8 +479,8 @@ def _call_with_cascade(fn, cfg: dict, *args,
     if log:
         log.info(f"Gemini start: {len(keys)} key(s) available, starting from key #{start_key + 1}")
 
-    # Flash models — last-resort fallback when all pro models fail (confirmed working 2025-04)
-    _FLASH_FALLBACK = ["gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp"]
+    # Flash models — last-resort fallback when all pro models fail
+    _FLASH_FALLBACK = ["gemini-2.5-flash"]
 
     # Try each key; for each key discover its available models and cascade through them
     for ki in range(len(keys)):
@@ -561,8 +549,41 @@ def _call_with_cascade(fn, cfg: dict, *args,
                             f"Переключаюсь на следующий ключ."
                         )
                     break
+                elif _is_503_error(e):
+                    # 503 overloaded — wait 10s and retry ONCE before moving on
+                    import time
+                    if log:
+                        log.info(
+                            f"Модель {model} перегружена (503). Жду 10 сек и повторяю..."
+                        )
+                    time.sleep(10)
+                    try:
+                        result = fn(key, *args, model_id=model, **kwargs)
+                        cfg["gemini_key_index"]       = key_idx
+                        cfg["_last_gemini_model"]     = model
+                        cfg["_last_gemini_key_num"]   = key_idx + 1
+                        cfg["_last_gemini_key_total"] = len(keys)
+                        if log:
+                            log.api("Gemini", f"{model} (key #{key_idx + 1}) retry OK", status=200)
+                        try:
+                            from app.config_manager import save_config
+                            save_config(cfg)
+                        except Exception:
+                            pass
+                        return result
+                    except Exception as retry_e:
+                        last_err = retry_e
+                        all_errors.append(retry_e)
+                        if log:
+                            log.info(f"Повторная попытка {model} не удалась: {str(retry_e)[:100]}")
+                        # Evict model from cache and try next
+                        ck = _cache_key(key)
+                        cached = _discovered_models_cache.get(ck, [])
+                        if model in cached:
+                            cached.remove(model)
+                        continue
                 elif _is_model_error(e):
-                    # Model unavailable (404, 403, 503 overload) — evict and try next
+                    # Model unavailable (404, 403) — evict and try next
                     ck = _cache_key(key)
                     cached = _discovered_models_cache.get(ck, [])
                     if model in cached:

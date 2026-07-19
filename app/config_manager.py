@@ -6,8 +6,8 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 DEFAULTS = {
     "youtube_api_key": "AIzaSyB-3w_DiRP02WuLCbWSkk3yZjcR8vswe7o",
     "anthropic_api_key": "",
-    "gemini_api_key": "AIzaSyD2TxtDZmpxfiU_l-mAtbK02tlHY2rm0mk",
-    "gemini_api_keys": ["AIzaSyD2TxtDZmpxfiU_l-mAtbK02tlHY2rm0mk"],
+    "gemini_api_key": "",
+    "gemini_api_keys": [],
     "gemini_key_index": 0,            # current active key index
     "gemini_model": "gemini-2.5-pro",
     "ai_provider": "gemini",
@@ -66,6 +66,11 @@ LEGACY_MODELS = {
 }
 
 
+_KNOWN_LEAKED_KEYS = {
+    "AIzaSyD2TxtDZmpxfiU_l-mAtbK02tlHY2rm0mk",
+}
+
+
 def load_config() -> dict:
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
@@ -80,6 +85,13 @@ def load_config() -> dict:
     # Reset stale/deprecated model to the current default
     if data.get("gemini_model") in LEGACY_MODELS:
         data["gemini_model"] = DEFAULTS["gemini_model"]
+    # Purge known-leaked keys so they don't waste API attempts
+    if data.get("gemini_api_key") in _KNOWN_LEAKED_KEYS:
+        data["gemini_api_key"] = ""
+    if data.get("gemini_api_keys"):
+        data["gemini_api_keys"] = [
+            k for k in data["gemini_api_keys"] if k not in _KNOWN_LEAKED_KEYS
+        ]
     return data
 
 
